@@ -1,0 +1,117 @@
+# <img src="https://i.imgur.com/ionPEb2.png" alt="Pocodex" width="300">
+
+Pocodex lets you use Codex.app in a regular browser, including on your phone or any other remote device. It's like Claude Code's Remote Control, but for Codex!
+
+It serves the real Codex desktop webview from `Codex.app`, reuses the bundled `codex app-server` as the agentic harness, and adds host-side shims for the desktop functionality the UI expects.
+
+<img src="https://i.imgur.com/mInn7oW.png" alt="Pocodex screenshot" width="200">
+
+## Install
+
+```bash
+pnpm add -g pocodex
+```
+
+## Run
+
+```bash
+pocodex
+```
+
+Pocodex prints a local URL and, when applicable, an "Open" URL. Open the printed URL in your browser.
+
+## Requirements
+
+- macOS with a local Codex install, usually `/Applications/Codex.app`
+- Node.js 24 or newer
+
+## Common Usage
+
+Run with the defaults:
+
+```bash
+pocodex
+```
+
+Expose it on your LAN with a session token:
+
+```bash
+pocodex --listen 0.0.0.0:8787 --token "$(openssl rand -hex 16)"
+```
+
+When listening on `0.0.0.0`, Pocodex also prints a preferred LAN URL if it can find one.
+
+## CLI
+
+```text
+pocodex [--token <secret>] [--app /Applications/Codex.app] [--listen 127.0.0.1:8787] [--dev]
+```
+
+### Flags
+
+- `--token` optional session secret used to authorize the browser session
+- `--app` path to the Codex app bundle
+- `--listen` host and port to bind, for example `127.0.0.1:8787` or `0.0.0.0:8787`
+- `--dev` watches `src/pocodex.css` and pushes live CSS reload events to the connected browser
+
+If you expose Pocodex beyond loopback, use a long random token. When configured, the token gates `/session`, and the browser bootstrap stores it in `sessionStorage` so reconnects can work without re-entering it.
+
+## How It Works
+
+### 1. Reuse the real Codex UI
+
+Pocodex reads and `Contents/Resources/app.asar` and serves those files. The browser is running the real Codex desktop UI, not a reimplementation.
+
+### 2. Patch the webview entrypoint
+
+Before serving `index.html`, Pocodex injects:
+
+- `pocodex.css`
+- an inline bootstrap script that installs the browser-side bridge
+- a matching CSP hash so the injected script can run under Codex's content security policy
+
+### 3. Reuse Codex's bundled app server
+
+Pocodex starts the app server shipped inside the `Codex.app` bundle:
+
+```text
+codex app-server --listen stdio://
+```
+
+That process is used as the core agentic harness. Pocodex then bridges the browser session to it.
+
+### 4. Shim the desktop host behavior
+
+Codex's webview expects to live inside Electron with a pile of host APIs behind it. Pocodex provides custom shims for the browser-hosted setup instead:
+
+- terminal sessions are backed by local PTYs via `node-pty`
+- git integration is bridged through the desktop git worker extracted from the Codex bundle
+- browser `vscode://codex/ipc-request` traffic is translated onto Pocodex's host IPC endpoint
+- workspace roots, persisted atoms, and related desktop state are mirrored on the host side
+- unsupported native features are blocked or stubbed where needed
+
+The shim behavior was derived by treating the shipped and minified `Codex.app` code as the implementation oracle.
+
+### 5. Connect the browser over a host HTTP server
+
+Pocodex creates an HTTP server on the host machine and serves the patched webview from there. The browser loads the UI over HTTP, uses `/ipc-request` for host-style requests, and opens a live WebSocket session on `/session` for bridge traffic and worker messages.
+
+An optional token can gate the browser session. Pocodex currently supports one active browser session at a time, so opening a new browser replaces the previous one.
+
+## Current Limitations
+
+- Only one active browser session is supported at a time
+- Native desktop behaviors such as notifications, badge updates, context menus, power-save controls, and window mode controls are blocked or stubbed
+- Generic IPC coverage is incomplete; unsupported IPC methods return an error response
+- Streaming fetch is not implemented
+- Some host fetch endpoints are stubbed with empty or placeholder data
+- This relies on internal Codex bundle structure and host protocols, so Codex app updates may break assumptions
+- Security is intentionally light; this is suitable for local use and trusted LANs, not public exposure
+
+## Contributing
+
+Contributor and source-development instructions live in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Thanks
+
+Thanks to [Ben Allfree](https://github.com/benallfree) for kindly giving this project the `pocodex` npm package name.

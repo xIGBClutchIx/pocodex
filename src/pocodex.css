@@ -1,0 +1,509 @@
+html[data-pocodex="true"] {
+  .app-header-left {
+    --spacing-token-safe-header-left: 0px !important;
+    --spacing-token-safe-header-right: 0px !important;
+  }
+
+  --pocodex-accent: var(--color-token-text-link-foreground, var(--color-text-accent, #3d8dff));
+  --pocodex-surface-bg: color-mix(
+    in srgb,
+    var(
+        --color-token-dropdown-background,
+        var(--color-background-elevated-primary, rgba(33, 33, 33, 0.96))
+      )
+      96%,
+    transparent
+  );
+  --pocodex-surface-subtle: var(--color-background-elevated-secondary, rgba(255, 255, 255, 0.06));
+  --pocodex-menu-bg: var(--color-token-menu-background, var(--pocodex-surface-bg));
+  --pocodex-border: var(
+    --color-token-menu-border,
+    var(--color-token-border, var(--color-border, rgba(255, 255, 255, 0.08)))
+  );
+  --pocodex-border-light: var(
+    --color-token-border-light,
+    var(--color-border-light, rgba(255, 255, 255, 0.04))
+  );
+  --pocodex-border-heavy: var(
+    --color-token-border-default,
+    var(--color-border-heavy, rgba(255, 255, 255, 0.16))
+  );
+  --pocodex-text: var(--color-token-foreground, var(--color-text-foreground, #ffffff));
+  --pocodex-text-secondary: var(
+    --color-token-description-foreground,
+    var(--color-text-foreground-secondary, rgba(255, 255, 255, 0.7))
+  );
+  --pocodex-text-tertiary: var(--color-text-foreground-tertiary, rgba(255, 255, 255, 0.5));
+  --pocodex-disabled: var(--color-token-disabled-foreground, var(--pocodex-text-tertiary));
+  --pocodex-overlay-scrim: color-mix(
+    in srgb,
+    var(--color-token-bg-primary, var(--color-background-surface-under, #000000)) 78%,
+    transparent
+  );
+  --pocodex-list-hover: var(
+    --color-token-list-hover-background,
+    var(--color-background-button-secondary-hover, rgba(255, 255, 255, 0.08))
+  );
+  --pocodex-list-selected: var(
+    --color-token-list-active-selection-background,
+    color-mix(in srgb, var(--pocodex-accent) 14%, transparent)
+  );
+  --pocodex-button-secondary-bg: var(
+    --color-background-button-secondary,
+    rgba(255, 255, 255, 0.05)
+  );
+  --pocodex-button-secondary-hover: var(
+    --color-token-button-secondary-hover-background,
+    var(--color-background-button-secondary-hover, rgba(255, 255, 255, 0.08))
+  );
+  --pocodex-button-primary-bg: var(
+    --color-token-button-background,
+    var(--color-background-accent, #0b5cff)
+  );
+  --pocodex-button-primary-hover: var(
+    --color-background-accent-hover,
+    var(--pocodex-button-primary-bg)
+  );
+  --pocodex-button-primary-fg: var(
+    --color-token-button-foreground,
+    var(--color-text-button-primary, #000000)
+  );
+  --pocodex-button-border: var(--color-token-button-border, var(--pocodex-border));
+  --pocodex-checkbox-accent: var(--color-token-checkbox-foreground, var(--pocodex-accent));
+  --pocodex-focus: var(
+    --color-token-focus-border,
+    var(--color-border-focus, var(--pocodex-accent))
+  );
+  --pocodex-shadow: var(--shadow-xl, 0 18px 40px rgba(0, 0, 0, 0.28));
+  --pocodex-radius-sm: var(--radius-md, 12px);
+  --pocodex-radius-md: var(--radius-xl, 16px);
+  --pocodex-radius-lg: var(--radius-3xl, 24px);
+  color: var(--pocodex-text);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+}
+
+html[data-pocodex="true"] #pocodex-toast-host {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+html[data-pocodex="true"] #pocodex-toast-host [data-pocodex-toast] {
+  max-width: min(360px, calc(100vw - 32px));
+  padding: 10px 12px;
+  border: 1px solid var(--pocodex-border);
+  border-radius: var(--pocodex-radius-sm);
+  background: color-mix(in srgb, var(--pocodex-menu-bg) 94%, transparent);
+  color: var(--pocodex-text);
+  font-size: var(--text-base, 13px);
+  line-height: 1.4;
+  box-shadow: var(--pocodex-shadow);
+  backdrop-filter: blur(12px);
+}
+
+html[data-pocodex="true"] #pocodex-status-host {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  pointer-events: none;
+}
+
+html[data-pocodex="true"] #pocodex-status-host[hidden] {
+  display: none;
+}
+
+html[data-pocodex="true"] #pocodex-status-host[data-mode="blocking"] {
+  background: var(--pocodex-overlay-scrim);
+  backdrop-filter: blur(12px);
+}
+
+html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-card] {
+  width: min(420px, calc(100vw - 48px));
+  padding: 20px;
+  border: 1px solid var(--pocodex-border);
+  border-radius: var(--pocodex-radius-lg);
+  background: var(--pocodex-surface-bg);
+  color: var(--pocodex-text);
+  box-shadow: var(--pocodex-shadow);
+  backdrop-filter: blur(14px);
+}
+
+html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-card] strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: var(--text-lg, 16px);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-card] p {
+  margin: 0;
+  color: var(--pocodex-text-secondary);
+  font-size: var(--text-base, 13px);
+  line-height: 1.45;
+}
+
+html[data-pocodex="true"] #pocodex-import-host {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483645;
+  pointer-events: none;
+}
+
+html[data-pocodex="true"] #pocodex-import-host[hidden] {
+  display: none;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-backdrop] {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--pocodex-overlay-scrim);
+  backdrop-filter: blur(12px);
+  pointer-events: auto;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-dialog] {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: calc(var(--spacing, 4px) * 5);
+  border: 1px solid var(--pocodex-border);
+  border-radius: var(--pocodex-radius-lg);
+  background: var(--pocodex-surface-bg);
+  color: var(--pocodex-text);
+  box-shadow: var(--pocodex-shadow);
+  backdrop-filter: blur(16px);
+}
+
+html[data-pocodex="true"] [data-pocodex-import-header] {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-header] h2,
+html[data-pocodex="true"] [data-pocodex-import-header] p,
+html[data-pocodex="true"] [data-pocodex-import-path] {
+  margin: 0;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-header] h2 {
+  font-size: var(--text-xl, 28px);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: var(--tracking-tight, -0.025em);
+}
+
+html[data-pocodex="true"] [data-pocodex-import-header] p {
+  color: var(--pocodex-text-secondary);
+  font-size: var(--text-base, 13px);
+  line-height: 1.45;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-path] {
+  padding: 10px 12px;
+  border: 1px solid var(--pocodex-border-light);
+  border-radius: var(--pocodex-radius-sm);
+  background: var(--pocodex-surface-subtle);
+  color: var(--pocodex-text-secondary);
+  font-family: var(--font-mono, var(--vscode-editor-font-family, monospace));
+  font-size: var(--text-sm, 12px);
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-list] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  padding-right: 4px;
+  border-bottom: 1px solid var(--pocodex-border-light);
+
+  scrollbar-color: var(--color-token-scrollbar-slider-background, var(--pocodex-border-heavy))
+    transparent;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-row] {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 12px 14px;
+  border: 1px solid var(--pocodex-border-light);
+  border-radius: var(--pocodex-radius-md);
+  background: var(--pocodex-surface-subtle);
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    opacity 120ms ease;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-row]:hover {
+  background: var(--pocodex-list-hover);
+  border-color: var(--pocodex-border);
+}
+
+html[data-pocodex="true"] [data-pocodex-import-row]:has(input:checked) {
+  background: color-mix(in srgb, var(--pocodex-list-selected) 72%, var(--pocodex-surface-subtle));
+  border-color: color-mix(in srgb, var(--pocodex-accent) 34%, var(--pocodex-border-heavy));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pocodex-accent) 20%, transparent);
+}
+
+html[data-pocodex="true"] [data-pocodex-import-row]:has(input:disabled) {
+  opacity: 0.68;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-row] input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--pocodex-checkbox-accent);
+  cursor: pointer;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-row] input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-details] {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-details] strong {
+  font-size: var(--text-base, 13px);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-details] code {
+  color: var(--pocodex-text-secondary);
+  font-family: var(--font-mono, var(--vscode-editor-font-family, monospace));
+  font-size: var(--text-sm, 12px);
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-badges] {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-badge] {
+  padding: 4px 8px;
+  border: 1px solid var(--pocodex-border-light);
+  border-radius: var(--radius-full, 999px);
+  background: color-mix(in srgb, var(--pocodex-surface-subtle) 92%, transparent);
+  color: var(--color-token-badge-foreground, var(--pocodex-text-secondary));
+  font-size: var(--text-xs, 10px);
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-actions] {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 14px;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-actions] button {
+  min-width: 140px;
+  padding: 4px 6px;
+  border: 1px solid var(--pocodex-button-border);
+  border-radius: var(--pocodex-radius-sm);
+  background: var(--pocodex-button-secondary-bg);
+  color: var(--pocodex-text);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: var(--text-base, 13px);
+  /* font-weight: 500; */
+  line-height: 1.35;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-actions] button[data-variant="primary"] {
+  background: var(--pocodex-button-primary-bg);
+  color: var(--pocodex-button-primary-fg);
+}
+
+html[data-pocodex="true"] [data-pocodex-import-actions] button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-actions] button:hover:not(:disabled) {
+  border-color: var(--pocodex-border-heavy);
+  background: var(--pocodex-button-secondary-hover);
+}
+
+html[data-pocodex="true"]
+  [data-pocodex-import-actions]
+  button[data-variant="primary"]:hover:not(:disabled) {
+  border-color: var(--pocodex-button-primary-bg);
+  background: var(--pocodex-button-primary-hover);
+}
+
+html[data-pocodex="true"] [data-pocodex-import-actions] button:focus-visible,
+html[data-pocodex="true"] [data-pocodex-import-menu-item="true"]:focus-visible {
+  outline: 2px solid var(--pocodex-focus);
+  outline-offset: 2px;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-menu-separator="true"] {
+  margin: 4px 8px;
+  border-top: 1px solid var(--pocodex-border-light);
+}
+
+html[data-pocodex="true"] [data-pocodex-import-menu-item="true"] {
+  width: calc(100% - 8px);
+  margin: 0;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--pocodex-radius-sm);
+  background: transparent;
+  color: var(--pocodex-text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-menu-item="true"]:hover {
+  background: var(--pocodex-list-hover);
+}
+
+html[data-pocodex="true"] [data-pocodex-import-menu-item="true"]:active {
+  background: color-mix(in srgb, var(--pocodex-list-hover) 72%, var(--pocodex-surface-subtle));
+}
+
+html[data-pocodex="true"] [data-pocodex-import-menu-icon="true"] {
+  width: 15px;
+  height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 15px;
+  color: inherit;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-menu-icon="true"] > svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+  color: inherit;
+}
+
+html[data-pocodex="true"] [data-pocodex-import-menu-label="true"] {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+html[data-pocodex="true"] [data-pocodex-open-in-app="true"] {
+  display: none !important;
+}
+
+html[data-pocodex="true"] body {
+  background: #f3f3f3 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-pocodex="true"] {
+    /*
+     * The browser theme exposes a dark primary button fill but resolves
+     * button-primary text to the same dark token, so keep the import CTA
+     * legible by forcing a light foreground in dark mode.
+     */
+    --pocodex-button-primary-fg: var(--color-white, #ffffff);
+  }
+
+  html[data-pocodex="true"] body {
+    background: #050505 !important;
+  }
+}
+
+html[data-pocodex="true"] [aria-label="Open in Popout Window"] {
+  display: none !important;
+}
+
+@media (max-width: 640px), (pointer: coarse) and (max-width: 900px) {
+  /* Prevent iOS Safari from zooming when text inputs receive focus. */
+  html[data-pocodex="true"] textarea,
+  html[data-pocodex="true"] select,
+  html[data-pocodex="true"]
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not(
+      [type="color"]
+    ):not([type="submit"]):not([type="button"]):not([type="image"]),
+  html[data-pocodex="true"] [contenteditable="true"] {
+    font-size: 16px !important;
+  }
+
+  html[data-pocodex="true"] [data-pocodex-import-backdrop] {
+    align-items: stretch;
+    padding: 12px;
+  }
+
+  html[data-pocodex="true"] [data-pocodex-import-dialog] {
+    width: auto;
+    max-height: none;
+    min-height: 100%;
+    border-radius: var(--pocodex-radius-md);
+  }
+
+  html[data-pocodex="true"] [data-pocodex-import-header] h2 {
+    font-size: 22px;
+  }
+
+  html[data-pocodex="true"] [data-pocodex-import-row] {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  html[data-pocodex="true"] [data-pocodex-import-badges] {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
+  html[data-pocodex="true"] [data-pocodex-import-actions] {
+    flex-direction: column-reverse;
+  }
+
+  html[data-pocodex="true"] [data-pocodex-import-actions] button {
+    width: 100%;
+  }
+
+  #app-header-portal-main button {
+    text-indent: -10000px;
+  }
+
+  #app-header-portal-main button span {
+    gap: 0;
+  }
+}

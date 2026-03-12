@@ -1,0 +1,69 @@
+{
+  "name": "pocodex",
+  "version": "0.1.3",
+  "description": "Serve the real Codex desktop webview in a browser and proxy the host runtime.",
+  "keywords": [
+    "browser",
+    "cli",
+    "codex",
+    "macos",
+    "openai"
+  ],
+  "license": "Apache-2.0",
+  "bin": {
+    "pocodex": "./dist/cli.js"
+  },
+  "files": [
+    "dist/**",
+    "LICENSE",
+    "README.md"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "rm -rf dist && tsgo -p tsconfig.json && pnpm run build:static",
+    "build:static": "mkdir -p dist/images && cp src/pocodex.css dist/pocodex.css && cp src/images/import.svg dist/images/import.svg",
+    "check": "pnpm run fmt:check && pnpm run lint && pnpm run typecheck",
+    "commitmsg": "commitlint --edit",
+    "dev": "tsx src/cli.ts",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "lint": "oxlint --deny-warnings .",
+    "lint:fix": "oxlint --fix .",
+    "prepare": "simple-git-hooks",
+    "prepack": "pnpm run build",
+    "test": "vitest run ./test",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@electron/asar": "^4.1.0",
+    "mime-types": "^3.0.2",
+    "node-pty": "^1.1.0",
+    "plist": "^3.1.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^20.4.4",
+    "@commitlint/config-conventional": "^20.4.4",
+    "@types/mime-types": "^3.0.1",
+    "@types/node": "^25.3.5",
+    "@types/plist": "^3.0.5",
+    "@types/ws": "^8.18.1",
+    "@typescript/native-preview": "^7.0.0-dev.20260312.1",
+    "oxfmt": "^0.39.0",
+    "oxlint": "^1.54.0",
+    "simple-git-hooks": "^2.13.1",
+    "tsx": "^4.21.0",
+    "vitest": "^4.0.18"
+  },
+  "simple-git-hooks": {
+    "commit-msg": "pnpm run commitmsg -- $1",
+    "pre-commit": "pnpm run check"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@9.9.0"
+}

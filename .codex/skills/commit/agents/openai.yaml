@@ -1,0 +1,4 @@
+interface:
+  display_name: "Commit"
+  short_description: "Prepare and write repo commits"
+  default_prompt: "Use $commit to prepare and write a Conventional Commit for this repository."

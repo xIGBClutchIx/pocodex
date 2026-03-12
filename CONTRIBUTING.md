@@ -1,0 +1,109 @@
+# Contributing
+
+## Development Setup
+
+Requirements:
+
+- macOS with a local Codex install, usually `/Applications/Codex.app`
+- Node.js 24 or newer
+- pnpm
+
+Install dependencies:
+
+```bash
+pnpm install
+```
+
+Run Pocodex directly from source:
+
+```bash
+pnpm run dev
+```
+
+Or build first and run the compiled CLI:
+
+```bash
+pnpm run build
+node dist/cli.js
+```
+
+If you want live stylesheet reloads while editing `src/pocodex.css`, add `--dev`.
+
+## Useful Commands
+
+```bash
+pnpm run build
+pnpm run check
+pnpm run typecheck
+pnpm run test
+```
+
+## Commit And Release Policy
+
+- Commits must use Conventional Commits. The local `commit-msg` hook enforces this with `commitlint`.
+- Run `pnpm run check` before committing if you bypass hooks or want an explicit local validation pass.
+- Releases are managed by `release-please` from commits merged into `main`, so `feat`, `fix`, and `!`/`BREAKING CHANGE:` markers drive versioning and changelog entries.
+
+For runtime logging:
+
+```bash
+POCODEX_DEBUG=1 pnpm run dev
+```
+
+For UI work, start with:
+
+```bash
+pnpm run dev -- --dev
+```
+
+Then edit `src/pocodex.css`. Pocodex watches that file and notifies the active browser session to swap in the new stylesheet without restarting the server.
+
+## Architecture
+
+### 1. Load the shipped Codex bundle
+
+Pocodex reads `Codex.app/Contents/Info.plist` and `Contents/Resources/app.asar`, extracts the `/webview` files into `~/.cache/pocodex/<version>`, and serves those real web assets instead of a locally rebuilt frontend.
+
+### 2. Patch the webview entry HTML
+
+Before serving `index.html`, Pocodex injects:
+
+- a dedicated stylesheet link for `pocodex.css`
+- an inline bootstrap script that installs the browser-side bridge
+- a matching CSP hash so the injected script can run under Codex's content security policy
+
+### 3. Spawn the bundled `codex app-server`
+
+Pocodex starts the CLI shipped inside the app bundle with:
+
+```text
+codex app-server --listen stdio://
+```
+
+It then initializes a JSON-RPC/MCP session over stdio and uses that process as the host runtime behind the browser session.
+
+### 4. Serve a browser-facing bridge
+
+The local HTTP server exposes:
+
+- `/` and `/index.html` for the patched Codex webview
+- `/pocodex.css` for Pocodex-specific styling
+- `/session-check` for optional token validation before WebSocket attach
+- `/session` as the browser's live WebSocket bridge
+- `/ipc-request` for browser requests that need to be mapped onto host-style IPC
+- `/healthz` for a simple health check
+
+The WebSocket channel carries bridge messages, worker messages, focus state, CSS reload notifications, and session revocation notices.
+
+### 5. Emulate the Electron host APIs in the browser
+
+The injected bootstrap script installs a browser-side bridge that looks enough like the desktop environment for the Codex webview to run. It:
+
+- validates the configured token, if any, and opens the `/session` WebSocket
+- forwards host bridge messages between the page and Pocodex
+- translates browser fetches for `vscode://codex/ipc-request` into `/ipc-request`
+- reconnects on transient failure
+- surfaces connection state in a small Pocodex status overlay
+- supports CSS hot reload in `--dev` mode
+- supports the integrated terminal via a local PTY bridge on the Pocodex host
+- supports git integration via a local git worker
