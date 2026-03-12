@@ -1038,10 +1038,8 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
           reloadStylesheet(envelope.href);
           break;
         case "session_revoked":
-          showNotice(envelope.reason || "This Pocodex session was replaced by another browser.");
-          setConnectionStatus(
-            envelope.reason || "This Pocodex session was replaced by another browser.",
-          );
+          showNotice(envelope.reason || "This Pocodex session is no longer available.");
+          setConnectionStatus(envelope.reason || "This Pocodex session is no longer available.");
           isClosing = true;
           socket?.close(4001, "revoked");
           break;

@@ -65,10 +65,11 @@ describe("PocodexServer", () => {
     const { server, relay, url } = await createTestServer();
     servers.push(server);
 
-    const socket = await connect(url, "secret");
-    const firstMessage = nextMessage(socket);
+    const first = await connect(url, "secret");
+    const second = await connect(url, "secret");
+    const firstMessage = nextMessage(first);
 
-    socket.send(
+    first.send(
       JSON.stringify({
         type: "bridge_message",
         message: {
@@ -103,26 +104,49 @@ describe("PocodexServer", () => {
       },
     });
 
-    socket.close();
+    await expectNoMessage(second);
+
+    first.close();
+    second.close();
   });
 
-  it("revokes the first browser session when a second client connects", async () => {
+  it("keeps the first browser session connected when a second client connects", async () => {
     const { server, relay, url } = await createTestServer();
     servers.push(server);
 
     const first = await connect(url, "secret");
-    first.send(JSON.stringify({ type: "worker_subscribe", workerName: "git" }));
-    await waitForCondition(() => relay.subscribedWorkers.includes("git"));
-
-    const revoked = nextMessage(first);
     const second = await connect(url, "secret");
 
-    await expect(revoked).resolves.toEqual({
-      type: "session_revoked",
-      reason: "This Pocodex session was replaced by another browser.",
+    await expectNoMessage(first);
+
+    const next = nextMessage(first);
+    first.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "fetch",
+          requestId: "request-1",
+          url: "vscode://codex/thread/list",
+        },
+      }),
+    );
+
+    await waitForCondition(() => relay.forwardedMessages.length === 1);
+    const prefixedRequestId = (relay.forwardedMessages[0] as { requestId: string }).requestId;
+    relay.emit("bridge_message", {
+      type: "fetch-response",
+      requestId: prefixedRequestId,
+      status: 200,
     });
 
-    await waitForCondition(() => relay.unsubscribedWorkers.includes("git"));
+    await expect(next).resolves.toEqual({
+      type: "bridge_message",
+      message: {
+        type: "fetch-response",
+        requestId: "request-1",
+        status: 200,
+      },
+    });
 
     first.close();
     second.close();
@@ -170,21 +194,291 @@ describe("PocodexServer", () => {
     socket.close();
   });
 
-  it("pushes css reload notifications to the active browser session", async () => {
+  it("broadcasts untargeted relay notifications to all connected browser sessions", async () => {
+    const { server, relay, url } = await createTestServer();
+    servers.push(server);
+
+    const first = await connect(url, "secret");
+    const second = await connect(url, "secret");
+    const firstNext = nextMessage(first);
+    const secondNext = nextMessage(second);
+
+    relay.emit("bridge_message", {
+      type: "pinned-threads-updated",
+    });
+
+    await expect(firstNext).resolves.toEqual({
+      type: "bridge_message",
+      message: {
+        type: "pinned-threads-updated",
+      },
+    });
+    await expect(secondNext).resolves.toEqual({
+      type: "bridge_message",
+      message: {
+        type: "pinned-threads-updated",
+      },
+    });
+
+    first.close();
+    second.close();
+  });
+
+  it("broadcasts css reload notifications to all connected browser sessions", async () => {
     const { server, url } = await createTestServer();
     servers.push(server);
 
-    const socket = await connect(url, "secret");
-    const next = nextMessage(socket);
+    const first = await connect(url, "secret");
+    const second = await connect(url, "secret");
+    const firstNext = nextMessage(first);
+    const secondNext = nextMessage(second);
 
     server.notifyStylesheetReload("123");
 
-    await expect(next).resolves.toEqual({
+    await expect(firstNext).resolves.toEqual({
+      type: "css_reload",
+      href: "/pocodex.css?v=123",
+    });
+    await expect(secondNext).resolves.toEqual({
       type: "css_reload",
       href: "/pocodex.css?v=123",
     });
 
-    socket.close();
+    first.close();
+    second.close();
+  });
+
+  it("refcounts worker subscriptions across browser sessions", async () => {
+    const { server, relay, url } = await createTestServer();
+    servers.push(server);
+
+    const first = await connect(url, "secret");
+    const second = await connect(url, "secret");
+
+    first.send(JSON.stringify({ type: "worker_subscribe", workerName: "git" }));
+    second.send(JSON.stringify({ type: "worker_subscribe", workerName: "git" }));
+
+    await waitForCondition(() => relay.subscribedWorkers.length === 1);
+    expect(relay.subscribedWorkers).toEqual(["git"]);
+
+    first.send(JSON.stringify({ type: "worker_unsubscribe", workerName: "git" }));
+    await waitForCondition(() => relay.subscribedWorkers.length === 1);
+    expect(relay.unsubscribedWorkers).toEqual([]);
+
+    second.close();
+    await waitForCondition(() => relay.unsubscribedWorkers.length === 1);
+    expect(relay.unsubscribedWorkers).toEqual(["git"]);
+
+    first.close();
+  });
+
+  it("routes terminal output to all observers while enforcing a single controller", async () => {
+    const { server, relay, url } = await createTestServer();
+    servers.push(server);
+
+    const first = await connect(url, "secret");
+    const second = await connect(url, "secret");
+
+    first.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "terminal-create",
+          sessionId: "term-a",
+          conversationId: "conv-1",
+          cwd: "/tmp",
+        },
+      }),
+    );
+
+    await waitForCondition(() => relay.forwardedMessages.length === 1);
+    expect(relay.forwardedMessages[0]).toEqual(
+      expect.objectContaining({
+        type: "terminal-create",
+        sessionId: "term-a",
+        _pocodexBrowserTerminalSessionId: "term-a",
+      }),
+    );
+
+    const firstBrowserSessionId = (
+      relay.forwardedMessages[0] as { _pocodexBrowserSessionId: string }
+    )._pocodexBrowserSessionId;
+
+    const firstAttached = nextMessage(first);
+    relay.emit("bridge_message", {
+      type: "terminal-attached",
+      sessionId: "term-a",
+      cwd: "/tmp",
+      shell: "/bin/zsh",
+      _pocodexBrowserSessionId: firstBrowserSessionId,
+      _pocodexBrowserTerminalSessionId: "term-a",
+    });
+
+    await expect(firstAttached).resolves.toEqual({
+      type: "bridge_message",
+      message: {
+        type: "terminal-attached",
+        sessionId: "term-a",
+        cwd: "/tmp",
+        shell: "/bin/zsh",
+      },
+    });
+
+    second.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "terminal-attach",
+          sessionId: "term-b",
+          conversationId: "conv-1",
+          cwd: "/tmp",
+        },
+      }),
+    );
+
+    await waitForCondition(() => relay.forwardedMessages.length === 2);
+    expect(relay.forwardedMessages[1]).toEqual(
+      expect.objectContaining({
+        type: "terminal-attach",
+        sessionId: "term-a",
+        _pocodexBrowserTerminalSessionId: "term-b",
+      }),
+    );
+
+    const secondBrowserSessionId = (
+      relay.forwardedMessages[1] as { _pocodexBrowserSessionId: string }
+    )._pocodexBrowserSessionId;
+
+    const secondInitLog = nextMessage(second);
+    relay.emit("bridge_message", {
+      type: "terminal-init-log",
+      sessionId: "term-b",
+      log: "prompt> ",
+      _pocodexBrowserSessionId: secondBrowserSessionId,
+      _pocodexBrowserTerminalSessionId: "term-b",
+    });
+    await expect(secondInitLog).resolves.toEqual({
+      type: "bridge_message",
+      message: {
+        type: "terminal-init-log",
+        sessionId: "term-b",
+        log: "prompt> ",
+      },
+    });
+
+    const secondAttached = nextMessage(second);
+    relay.emit("bridge_message", {
+      type: "terminal-attached",
+      sessionId: "term-b",
+      cwd: "/tmp",
+      shell: "/bin/zsh",
+      _pocodexBrowserSessionId: secondBrowserSessionId,
+      _pocodexBrowserTerminalSessionId: "term-b",
+    });
+    await expect(secondAttached).resolves.toEqual({
+      type: "bridge_message",
+      message: {
+        type: "terminal-attached",
+        sessionId: "term-b",
+        cwd: "/tmp",
+        shell: "/bin/zsh",
+      },
+    });
+
+    const firstData = nextMessage(first);
+    const secondData = nextMessage(second);
+    relay.emit("bridge_message", {
+      type: "terminal-data",
+      sessionId: "term-a",
+      data: "pwd\r\n",
+    });
+
+    await expect(firstData).resolves.toEqual({
+      type: "bridge_message",
+      message: {
+        type: "terminal-data",
+        sessionId: "term-a",
+        data: "pwd\r\n",
+      },
+    });
+    await expect(secondData).resolves.toEqual({
+      type: "bridge_message",
+      message: {
+        type: "terminal-data",
+        sessionId: "term-b",
+        data: "pwd\r\n",
+      },
+    });
+
+    const observerRejected = nextMessage(second);
+    second.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "terminal-write",
+          sessionId: "term-b",
+          data: "whoami\n",
+        },
+      }),
+    );
+
+    await expect(observerRejected).resolves.toEqual({
+      type: "bridge_message",
+      message: {
+        type: "terminal-error",
+        sessionId: "term-b",
+        message: "Another browser controls this terminal.",
+      },
+    });
+    expect(relay.forwardedMessages).toHaveLength(2);
+
+    first.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "terminal-write",
+          sessionId: "term-a",
+          data: "whoami\n",
+        },
+      }),
+    );
+
+    await waitForCondition(() => relay.forwardedMessages.length === 3);
+    expect(relay.forwardedMessages[2]).toEqual(
+      expect.objectContaining({
+        type: "terminal-write",
+        sessionId: "term-a",
+        data: "whoami\n",
+      }),
+    );
+
+    const firstClosed = new Promise<void>((resolve) => {
+      first.once("close", () => resolve());
+    });
+    first.close();
+    await firstClosed;
+
+    second.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "terminal-write",
+          sessionId: "term-b",
+          data: "whoami\n",
+        },
+      }),
+    );
+
+    await waitForCondition(() => relay.forwardedMessages.length === 4);
+    expect(relay.forwardedMessages[3]).toEqual(
+      expect.objectContaining({
+        type: "terminal-write",
+        sessionId: "term-a",
+        data: "whoami\n",
+      }),
+    );
+
+    second.close();
   });
 
   it("routes vscode ipc requests through the relay", async () => {
@@ -280,6 +574,39 @@ async function nextMessage(socket: WebSocket): Promise<unknown> {
     socket.once("close", () => reject(new Error("socket closed before a message arrived")));
   });
   return JSON.parse(data);
+}
+
+async function expectNoMessage(socket: WebSocket, timeoutMs = 100): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, timeoutMs);
+
+    const onMessage = (buffer: Buffer) => {
+      cleanup();
+      reject(new Error(`Unexpected message: ${String(buffer)}`));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+    socket.on("close", onClose);
+  });
 }
 
 async function waitForCondition(predicate: () => boolean): Promise<void> {

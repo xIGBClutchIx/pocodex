@@ -19,6 +19,8 @@ export interface TerminalCreateMessage {
   cwd?: unknown;
   cols?: unknown;
   rows?: unknown;
+  _pocodexBrowserSessionId?: unknown;
+  _pocodexBrowserTerminalSessionId?: unknown;
 }
 
 export interface TerminalAttachMessage {
@@ -28,27 +30,37 @@ export interface TerminalAttachMessage {
   cols?: unknown;
   rows?: unknown;
   forceCwdSync?: unknown;
+  _pocodexBrowserSessionId?: unknown;
+  _pocodexBrowserTerminalSessionId?: unknown;
 }
 
 export interface TerminalWriteMessage {
   sessionId?: unknown;
   data?: unknown;
+  _pocodexBrowserSessionId?: unknown;
+  _pocodexBrowserTerminalSessionId?: unknown;
 }
 
 export interface TerminalRunActionMessage {
   sessionId?: unknown;
   cwd?: unknown;
   command?: unknown;
+  _pocodexBrowserSessionId?: unknown;
+  _pocodexBrowserTerminalSessionId?: unknown;
 }
 
 export interface TerminalResizeMessage {
   sessionId?: unknown;
   cols?: unknown;
   rows?: unknown;
+  _pocodexBrowserSessionId?: unknown;
+  _pocodexBrowserTerminalSessionId?: unknown;
 }
 
 export interface TerminalCloseMessage {
   sessionId?: unknown;
+  _pocodexBrowserSessionId?: unknown;
+  _pocodexBrowserTerminalSessionId?: unknown;
 }
 
 interface TerminalCreateOrAttachRequest {
@@ -58,6 +70,13 @@ interface TerminalCreateOrAttachRequest {
   cols: number;
   rows: number;
   forceCwdSync: boolean;
+  browserSessionId: string | null;
+  browserTerminalSessionId: string | null;
+}
+
+interface TerminalRoutingTarget {
+  browserSessionId: string | null;
+  browserTerminalSessionId: string | null;
 }
 
 interface TerminalSession {
@@ -115,30 +134,37 @@ export class TerminalSessionManager {
   write(message: TerminalWriteMessage): void {
     const sessionId = readString(message.sessionId);
     const data = typeof message.data === "string" ? message.data : null;
+    const routingTarget = readTerminalRoutingTarget(message);
     if (!sessionId || data === null) {
       return;
     }
 
     const session = this.sessions.get(sessionId);
     if (!session) {
-      this.sendError(sessionId, "Terminal session is not available.");
+      this.sendError(sessionId, "Terminal session is not available.", routingTarget);
       return;
     }
 
-    this.performPtyAction(sessionId, session, () => {
-      session.pty.write(data);
-    });
+    this.performPtyAction(
+      sessionId,
+      session,
+      () => {
+        session.pty.write(data);
+      },
+      routingTarget,
+    );
   }
 
   runAction(message: TerminalRunActionMessage): void {
     const sessionId = readString(message.sessionId);
+    const routingTarget = readTerminalRoutingTarget(message);
     if (!sessionId) {
       return;
     }
 
     const session = this.sessions.get(sessionId);
     if (!session) {
-      this.sendError(sessionId, "Terminal session is not available.");
+      this.sendError(sessionId, "Terminal session is not available.", routingTarget);
       return;
     }
 
@@ -146,14 +172,20 @@ export class TerminalSessionManager {
     const localCwd = this.resolveLocalCwd(requestedCwd);
     const command = typeof message.command === "string" ? message.command : "";
 
-    this.performPtyAction(sessionId, session, () => {
-      session.cwd = localCwd;
-      session.pty.write(buildRunActionCommand(localCwd, command));
-    });
+    this.performPtyAction(
+      sessionId,
+      session,
+      () => {
+        session.cwd = localCwd;
+        session.pty.write(buildRunActionCommand(localCwd, command));
+      },
+      routingTarget,
+    );
   }
 
   resize(message: TerminalResizeMessage): void {
     const sessionId = readString(message.sessionId);
+    const routingTarget = readTerminalRoutingTarget(message);
     if (!sessionId) {
       return;
     }
@@ -169,19 +201,26 @@ export class TerminalSessionManager {
       return;
     }
 
-    this.performPtyAction(sessionId, session, () => {
-      session.pty.resize(cols, rows);
-    });
+    this.performPtyAction(
+      sessionId,
+      session,
+      () => {
+        session.pty.resize(cols, rows);
+      },
+      routingTarget,
+    );
   }
 
   close(message: TerminalCloseMessage): void {
     const sessionId = readString(message.sessionId);
+    const routingTarget = readTerminalRoutingTarget(message);
     if (!sessionId) {
       return;
     }
 
     const session = this.sessions.get(sessionId);
     if (!session) {
+      this.sendError(sessionId, "Terminal session is not available.", routingTarget);
       return;
     }
 
@@ -258,9 +297,9 @@ export class TerminalSessionManager {
 
       this.sessions.set(session.id, session);
       this.setConversationId(session, request.conversationId);
-      this.emitAttachEvents(session);
+      this.emitAttachEvents(session, request);
     } catch (error) {
-      this.sendError(sessionId, normalizeErrorMessage(error));
+      this.sendError(sessionId, normalizeErrorMessage(error), request);
     }
   }
 
@@ -269,46 +308,66 @@ export class TerminalSessionManager {
     this.setConversationId(session, request.conversationId);
 
     if (request.cols > 0 && request.rows > 0) {
-      this.performPtyAction(session.id, session, () => {
-        session.pty.resize(request.cols, request.rows);
-      });
+      this.performPtyAction(
+        session.id,
+        session,
+        () => {
+          session.pty.resize(request.cols, request.rows);
+        },
+        request,
+      );
     }
 
     if (request.forceCwdSync && request.cwd) {
       const cwd = this.resolveLocalCwd(request.cwd);
       if (cwd !== session.cwd) {
-        this.performPtyAction(session.id, session, () => {
-          session.cwd = cwd;
-          session.pty.write(`cd ${shellQuote(cwd)}\n`);
-        });
+        this.performPtyAction(
+          session.id,
+          session,
+          () => {
+            session.cwd = cwd;
+            session.pty.write(`cd ${shellQuote(cwd)}\n`);
+          },
+          request,
+        );
       }
     }
 
-    this.emitAttachEvents(session);
+    this.emitAttachEvents(session, request);
   }
 
-  private emitAttachEvents(session: TerminalSession): void {
+  private emitAttachEvents(session: TerminalSession, request: TerminalCreateOrAttachRequest): void {
+    const sessionId = request.browserTerminalSessionId ?? session.id;
     if (session.buffer.length > 0) {
-      this.emitBridgeMessage({
-        type: "terminal-init-log",
-        sessionId: session.id,
-        log: session.buffer,
-      });
+      this.emitBridgeMessage(
+        withTerminalRoutingTarget(request, {
+          type: "terminal-init-log",
+          sessionId,
+          log: session.buffer,
+        }),
+      );
     }
 
-    this.emitBridgeMessage({
-      type: "terminal-attached",
-      sessionId: session.id,
-      cwd: session.cwd,
-      shell: session.shell,
-    });
+    this.emitBridgeMessage(
+      withTerminalRoutingTarget(request, {
+        type: "terminal-attached",
+        sessionId,
+        cwd: session.cwd,
+        shell: session.shell,
+      }),
+    );
   }
 
-  private performPtyAction(sessionId: string, session: TerminalSession, action: () => void): void {
+  private performPtyAction(
+    sessionId: string,
+    session: TerminalSession,
+    action: () => void,
+    routingTarget: TerminalRoutingTarget,
+  ): void {
     try {
       action();
     } catch (error) {
-      this.sendError(sessionId, normalizeErrorMessage(error));
+      this.sendError(sessionId, normalizeErrorMessage(error), routingTarget);
       this.destroySession(session, {
         emitExit: true,
         killPty: true,
@@ -346,7 +405,10 @@ export class TerminalSessionManager {
       try {
         session.pty.kill();
       } catch (error) {
-        this.sendError(session.id, normalizeErrorMessage(error));
+        this.sendError(session.id, normalizeErrorMessage(error), {
+          browserSessionId: null,
+          browserTerminalSessionId: null,
+        });
       }
     }
 
@@ -418,12 +480,18 @@ export class TerminalSessionManager {
     return process.cwd();
   }
 
-  private sendError(sessionId: string, message: string): void {
-    this.emitBridgeMessage({
-      type: "terminal-error",
-      sessionId,
-      message,
-    });
+  private sendError(
+    sessionId: string,
+    message: string,
+    routingTarget: TerminalRoutingTarget,
+  ): void {
+    this.emitBridgeMessage(
+      withTerminalRoutingTarget(routingTarget, {
+        type: "terminal-error",
+        sessionId: routingTarget.browserTerminalSessionId ?? sessionId,
+        message,
+      }),
+    );
   }
 }
 
@@ -437,6 +505,37 @@ function normalizeCreateOrAttachRequest(
     cols: readPositiveInteger(message.cols) ?? DEFAULT_TERMINAL_COLS,
     rows: readPositiveInteger(message.rows) ?? DEFAULT_TERMINAL_ROWS,
     forceCwdSync: "forceCwdSync" in message && message.forceCwdSync === true,
+    browserSessionId: readString(message._pocodexBrowserSessionId),
+    browserTerminalSessionId: readString(message._pocodexBrowserTerminalSessionId),
+  };
+}
+
+function readTerminalRoutingTarget(
+  message:
+    | TerminalCreateMessage
+    | TerminalAttachMessage
+    | TerminalWriteMessage
+    | TerminalRunActionMessage
+    | TerminalResizeMessage
+    | TerminalCloseMessage,
+): TerminalRoutingTarget {
+  return {
+    browserSessionId: readString(message._pocodexBrowserSessionId),
+    browserTerminalSessionId: readString(message._pocodexBrowserTerminalSessionId),
+  };
+}
+
+function withTerminalRoutingTarget(target: TerminalRoutingTarget, message: JsonRecord): JsonRecord {
+  if (!target.browserSessionId && !target.browserTerminalSessionId) {
+    return message;
+  }
+
+  return {
+    ...message,
+    ...(target.browserSessionId ? { _pocodexBrowserSessionId: target.browserSessionId } : {}),
+    ...(target.browserTerminalSessionId
+      ? { _pocodexBrowserTerminalSessionId: target.browserTerminalSessionId }
+      : {}),
   };
 }
 

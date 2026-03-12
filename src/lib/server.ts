@@ -16,6 +16,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { debugLog } from "./debug.js";
 import { getUnsupportedBridgeNotice } from "./native-policy.js";
 import type {
+  JsonRecord,
   BrowserToServerEnvelope,
   PocodexServerOptions,
   ServerToBrowserEnvelope,
@@ -27,13 +28,36 @@ interface BrowserSession {
   socket: WebSocket;
   subscribedWorkers: Set<string>;
   isFocused: boolean;
+  terminalSessionIdsByLocalSessionId: Map<string, string>;
 }
+
+interface TerminalSessionRoute {
+  id: string;
+  conversationId: string | null;
+  ownerBrowserSessionId: string | null;
+  participantOrder: string[];
+  localSessionIdsByBrowserSessionId: Map<string, string>;
+}
+
+const TERMINAL_CONTROL_MESSAGE_TYPES = new Set([
+  "terminal-write",
+  "terminal-run-action",
+  "terminal-resize",
+  "terminal-close",
+]);
+const TERMINAL_ATTACH_MESSAGE_TYPES = new Set(["terminal-create", "terminal-attach"]);
+const TERMINAL_STREAM_MESSAGE_TYPES = new Set(["terminal-data", "terminal-error", "terminal-exit"]);
+const TERMINAL_TARGET_BROWSER_SESSION_ID_KEY = "_pocodexBrowserSessionId";
+const TERMINAL_TARGET_BROWSER_TERMINAL_SESSION_ID_KEY = "_pocodexBrowserTerminalSessionId";
 
 export class PocodexServer {
   private readonly httpServer: HttpServer;
   private readonly wsServer: WebSocketServer;
   private readonly pendingBySocket = new WeakMap<WebSocket, Promise<void>>();
-  private activeSession?: BrowserSession;
+  private readonly sessions = new Map<string, BrowserSession>();
+  private readonly workerSubscriberCounts = new Map<string, number>();
+  private readonly terminalSessionRoutes = new Map<string, TerminalSessionRoute>();
+  private readonly terminalSessionIdsByConversation = new Map<string, string>();
   private indexHtmlPromise?: Promise<string>;
 
   constructor(private readonly options: PocodexServerOptions) {
@@ -56,7 +80,7 @@ export class PocodexServer {
       this.handleRelayWorkerMessage(workerName, message);
     });
     this.options.relay.on("error", (error) => {
-      this.sendToActiveSession({
+      this.broadcast({
         type: "error",
         message: error.message,
       });
@@ -74,10 +98,13 @@ export class PocodexServer {
   }
 
   async close(): Promise<void> {
-    if (this.activeSession) {
-      this.activeSession.socket.close(1000, "shutdown");
-      this.activeSession = undefined;
+    for (const session of this.sessions.values()) {
+      session.socket.close(1000, "shutdown");
     }
+    this.sessions.clear();
+    this.workerSubscriberCounts.clear();
+    this.terminalSessionRoutes.clear();
+    this.terminalSessionIdsByConversation.clear();
 
     for (const client of this.wsServer.clients) {
       client.terminate();
@@ -109,7 +136,7 @@ export class PocodexServer {
   }
 
   notifyStylesheetReload(versionTag: string): void {
-    this.sendToActiveSession({
+    this.broadcast({
       type: "css_reload",
       href: `/pocodex.css?v=${encodeURIComponent(versionTag)}`,
     });
@@ -217,20 +244,9 @@ export class PocodexServer {
       socket,
       subscribedWorkers: new Set(),
       isFocused: true,
+      terminalSessionIdsByLocalSessionId: new Map(),
     };
-
-    if (this.activeSession) {
-      this.send(this.activeSession.socket, {
-        type: "session_revoked",
-        reason: "This Pocodex session was replaced by another browser.",
-      });
-      for (const workerName of this.activeSession.subscribedWorkers) {
-        void this.options.relay.unsubscribeWorker(workerName);
-      }
-      this.activeSession.socket.close(4001, "replaced");
-    }
-
-    this.activeSession = session;
+    this.sessions.set(session.id, session);
     debugLog("server", "browser connected", { sessionId: session.id });
 
     socket.on("message", (data) => {
@@ -248,14 +264,10 @@ export class PocodexServer {
 
     socket.on("close", () => {
       debugLog("server", "browser disconnected", { sessionId: session.id });
-      if (this.activeSession?.id !== session.id) {
+      if (this.sessions.get(session.id) !== session) {
         return;
       }
-
-      for (const workerName of session.subscribedWorkers) {
-        void this.options.relay.unsubscribeWorker(workerName);
-      }
-      this.activeSession = undefined;
+      this.cleanupSession(session);
     });
   }
 
@@ -267,7 +279,7 @@ export class PocodexServer {
     const envelope = JSON.parse(raw) as BrowserToServerEnvelope;
     debugLog("server", "browser message", envelope);
 
-    if (this.activeSession?.id !== session.id) {
+    if (this.sessions.get(session.id) !== session) {
       this.send(session.socket, {
         type: "session_revoked",
         reason: "This Pocodex session is no longer active.",
@@ -283,12 +295,12 @@ export class PocodexServer {
       case "worker_subscribe":
         if (!session.subscribedWorkers.has(envelope.workerName)) {
           session.subscribedWorkers.add(envelope.workerName);
-          await this.options.relay.subscribeWorker(envelope.workerName);
+          await this.incrementWorkerSubscribers(envelope.workerName);
         }
         break;
       case "worker_unsubscribe":
         if (session.subscribedWorkers.delete(envelope.workerName)) {
-          await this.options.relay.unsubscribeWorker(envelope.workerName);
+          await this.decrementWorkerSubscribers(envelope.workerName);
         }
         break;
       case "worker_message":
@@ -326,6 +338,11 @@ export class PocodexServer {
           isFocused: session.isFocused,
         },
       });
+      return;
+    }
+
+    if (isTerminalBridgeMessage(message)) {
+      await this.handleTerminalBridgeEnvelope(session, message);
       return;
     }
 
@@ -411,34 +428,331 @@ export class PocodexServer {
       return;
     }
 
-    if (routed.sessionId && this.activeSession?.id !== routed.sessionId) {
+    const bridgeMessage = routed.message;
+    if (routed.sessionId) {
+      this.sendBridgeMessageToSession(routed.sessionId, bridgeMessage);
       return;
     }
 
-    this.sendToActiveSession({
+    if (!isJsonRecord(bridgeMessage) || typeof bridgeMessage.type !== "string") {
+      this.broadcast({
+        type: "bridge_message",
+        message: bridgeMessage,
+      });
+      return;
+    }
+
+    const typedBridgeMessage = bridgeMessage as JsonRecord & { type: string };
+
+    if (this.handleTargetedTerminalRelayMessage(typedBridgeMessage)) {
+      return;
+    }
+
+    if (this.handleTerminalStreamRelayMessage(typedBridgeMessage)) {
+      return;
+    }
+
+    this.broadcast({
       type: "bridge_message",
-      message: routed.message,
+      message: stripInternalBridgeFields(typedBridgeMessage),
     });
   }
 
   private handleRelayWorkerMessage(workerName: string, message: unknown): void {
     debugLog("server", "relay worker message", { workerName, message });
-    if (!this.activeSession?.subscribedWorkers.has(workerName)) {
+    for (const session of this.sessions.values()) {
+      if (!session.subscribedWorkers.has(workerName)) {
+        continue;
+      }
+      this.send(session.socket, {
+        type: "worker_message",
+        workerName,
+        message,
+      });
+    }
+  }
+
+  private async handleTerminalBridgeEnvelope(
+    session: BrowserSession,
+    message: JsonRecord & { type: string },
+  ): Promise<void> {
+    if (TERMINAL_ATTACH_MESSAGE_TYPES.has(message.type)) {
+      await this.handleTerminalAttachEnvelope(session, message);
       return;
     }
 
-    this.sendToActiveSession({
-      type: "worker_message",
-      workerName,
+    if (TERMINAL_CONTROL_MESSAGE_TYPES.has(message.type)) {
+      await this.handleTerminalControlEnvelope(session, message);
+      return;
+    }
+
+    await this.options.relay.forwardBridgeMessage(message);
+  }
+
+  private async handleTerminalAttachEnvelope(
+    session: BrowserSession,
+    message: JsonRecord & { type: string },
+  ): Promise<void> {
+    const requestedLocalSessionId =
+      readNonEmptyString(message.sessionId) ?? `pocodex-terminal:${session.id}:${randomUUID()}`;
+    const conversationId = readNonEmptyString(message.conversationId);
+    const canonicalSessionId =
+      session.terminalSessionIdsByLocalSessionId.get(requestedLocalSessionId) ??
+      (conversationId ? this.terminalSessionIdsByConversation.get(conversationId) : null) ??
+      requestedLocalSessionId;
+
+    const route = this.ensureTerminalRoute(canonicalSessionId, conversationId);
+    this.attachBrowserToTerminal(route, session, requestedLocalSessionId);
+
+    await this.options.relay.forwardBridgeMessage({
+      ...message,
+      sessionId: canonicalSessionId,
+      [TERMINAL_TARGET_BROWSER_SESSION_ID_KEY]: session.id,
+      [TERMINAL_TARGET_BROWSER_TERMINAL_SESSION_ID_KEY]: requestedLocalSessionId,
+    });
+  }
+
+  private async handleTerminalControlEnvelope(
+    session: BrowserSession,
+    message: JsonRecord & { type: string },
+  ): Promise<void> {
+    const requestedLocalSessionId = readNonEmptyString(message.sessionId);
+    if (!requestedLocalSessionId) {
+      return;
+    }
+
+    const canonicalSessionId =
+      session.terminalSessionIdsByLocalSessionId.get(requestedLocalSessionId);
+    if (!canonicalSessionId) {
+      this.sendTerminalError(
+        session.id,
+        requestedLocalSessionId,
+        "Terminal session is not available.",
+      );
+      return;
+    }
+
+    const route = this.terminalSessionRoutes.get(canonicalSessionId);
+    if (!route) {
+      this.sendTerminalError(
+        session.id,
+        requestedLocalSessionId,
+        "Terminal session is not available.",
+      );
+      return;
+    }
+
+    this.refreshTerminalOwner(route);
+    if (route.ownerBrowserSessionId !== session.id) {
+      this.sendTerminalError(
+        session.id,
+        requestedLocalSessionId,
+        "Another browser controls this terminal.",
+      );
+      return;
+    }
+
+    await this.options.relay.forwardBridgeMessage({
+      ...message,
+      sessionId: canonicalSessionId,
+      [TERMINAL_TARGET_BROWSER_SESSION_ID_KEY]: session.id,
+      [TERMINAL_TARGET_BROWSER_TERMINAL_SESSION_ID_KEY]: requestedLocalSessionId,
+    });
+  }
+
+  private ensureTerminalRoute(
+    terminalSessionId: string,
+    conversationId: string | null,
+  ): TerminalSessionRoute {
+    let route = this.terminalSessionRoutes.get(terminalSessionId);
+    if (!route) {
+      route = {
+        id: terminalSessionId,
+        conversationId,
+        ownerBrowserSessionId: null,
+        participantOrder: [],
+        localSessionIdsByBrowserSessionId: new Map(),
+      };
+      this.terminalSessionRoutes.set(terminalSessionId, route);
+    }
+
+    if (conversationId) {
+      route.conversationId = conversationId;
+      this.terminalSessionIdsByConversation.set(conversationId, terminalSessionId);
+    }
+
+    return route;
+  }
+
+  private attachBrowserToTerminal(
+    route: TerminalSessionRoute,
+    session: BrowserSession,
+    localSessionId: string,
+  ): void {
+    const previousLocalSessionId = route.localSessionIdsByBrowserSessionId.get(session.id);
+    if (previousLocalSessionId && previousLocalSessionId !== localSessionId) {
+      session.terminalSessionIdsByLocalSessionId.delete(previousLocalSessionId);
+    }
+
+    route.localSessionIdsByBrowserSessionId.set(session.id, localSessionId);
+    session.terminalSessionIdsByLocalSessionId.set(localSessionId, route.id);
+    if (!route.participantOrder.includes(session.id)) {
+      route.participantOrder.push(session.id);
+    }
+    if (!route.ownerBrowserSessionId) {
+      route.ownerBrowserSessionId = session.id;
+    }
+  }
+
+  private handleTargetedTerminalRelayMessage(message: JsonRecord & { type: string }): boolean {
+    const targetBrowserSessionId = readNonEmptyString(
+      message[TERMINAL_TARGET_BROWSER_SESSION_ID_KEY],
+    );
+    if (!targetBrowserSessionId) {
+      return false;
+    }
+
+    this.sendBridgeMessageToSession(targetBrowserSessionId, stripInternalBridgeFields(message));
+    return true;
+  }
+
+  private handleTerminalStreamRelayMessage(message: JsonRecord & { type: string }): boolean {
+    if (!TERMINAL_STREAM_MESSAGE_TYPES.has(message.type)) {
+      return false;
+    }
+
+    const canonicalSessionId = readNonEmptyString(message.sessionId);
+    if (!canonicalSessionId) {
+      return false;
+    }
+
+    const route = this.terminalSessionRoutes.get(canonicalSessionId);
+    if (!route) {
+      return false;
+    }
+
+    for (const [browserSessionId, localSessionId] of route.localSessionIdsByBrowserSessionId) {
+      this.sendBridgeMessageToSession(browserSessionId, {
+        ...stripInternalBridgeFields(message),
+        sessionId: localSessionId,
+      });
+    }
+
+    if (message.type === "terminal-exit") {
+      this.deleteTerminalRoute(route);
+    }
+
+    return true;
+  }
+
+  private sendBridgeMessageToSession(sessionId: string, message: unknown): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+
+    this.send(session.socket, {
+      type: "bridge_message",
       message,
     });
   }
 
-  private sendToActiveSession(envelope: ServerToBrowserEnvelope): void {
-    if (!this.activeSession) {
+  private sendTerminalError(
+    browserSessionId: string,
+    localTerminalSessionId: string,
+    message: string,
+  ): void {
+    this.sendBridgeMessageToSession(browserSessionId, {
+      type: "terminal-error",
+      sessionId: localTerminalSessionId,
+      message,
+    });
+  }
+
+  private async incrementWorkerSubscribers(workerName: string): Promise<void> {
+    const count = this.workerSubscriberCounts.get(workerName) ?? 0;
+    if (count === 0) {
+      await this.options.relay.subscribeWorker(workerName);
+    }
+    this.workerSubscriberCounts.set(workerName, count + 1);
+  }
+
+  private async decrementWorkerSubscribers(workerName: string): Promise<void> {
+    const count = this.workerSubscriberCounts.get(workerName) ?? 0;
+    if (count <= 1) {
+      this.workerSubscriberCounts.delete(workerName);
+      if (count === 1) {
+        await this.options.relay.unsubscribeWorker(workerName);
+      }
       return;
     }
-    this.send(this.activeSession.socket, envelope);
+
+    this.workerSubscriberCounts.set(workerName, count - 1);
+  }
+
+  private cleanupSession(session: BrowserSession): void {
+    this.sessions.delete(session.id);
+    for (const workerName of session.subscribedWorkers) {
+      void this.decrementWorkerSubscribers(workerName);
+    }
+
+    for (const [localSessionId, terminalSessionId] of session.terminalSessionIdsByLocalSessionId) {
+      session.terminalSessionIdsByLocalSessionId.delete(localSessionId);
+      this.detachBrowserFromTerminal(terminalSessionId, session.id);
+    }
+  }
+
+  private detachBrowserFromTerminal(terminalSessionId: string, browserSessionId: string): void {
+    const route = this.terminalSessionRoutes.get(terminalSessionId);
+    if (!route) {
+      return;
+    }
+
+    route.localSessionIdsByBrowserSessionId.delete(browserSessionId);
+    route.participantOrder = route.participantOrder.filter(
+      (sessionId) => sessionId !== browserSessionId,
+    );
+
+    if (route.ownerBrowserSessionId === browserSessionId) {
+      route.ownerBrowserSessionId = route.participantOrder[0] ?? null;
+    }
+
+    if (route.localSessionIdsByBrowserSessionId.size === 0) {
+      this.deleteTerminalRoute(route);
+    }
+  }
+
+  private deleteTerminalRoute(route: TerminalSessionRoute): void {
+    this.terminalSessionRoutes.delete(route.id);
+    if (
+      route.conversationId &&
+      this.terminalSessionIdsByConversation.get(route.conversationId) === route.id
+    ) {
+      this.terminalSessionIdsByConversation.delete(route.conversationId);
+    }
+
+    for (const [browserSessionId, localSessionId] of route.localSessionIdsByBrowserSessionId) {
+      const session = this.sessions.get(browserSessionId);
+      session?.terminalSessionIdsByLocalSessionId.delete(localSessionId);
+    }
+  }
+
+  private refreshTerminalOwner(route: TerminalSessionRoute): void {
+    if (route.ownerBrowserSessionId && this.sessions.has(route.ownerBrowserSessionId)) {
+      return;
+    }
+
+    route.participantOrder = route.participantOrder.filter((sessionId) => {
+      const session = this.sessions.get(sessionId);
+      return session ? route.localSessionIdsByBrowserSessionId.has(session.id) : false;
+    });
+    route.ownerBrowserSessionId = route.participantOrder[0] ?? null;
+  }
+
+  private broadcast(envelope: ServerToBrowserEnvelope): void {
+    for (const session of this.sessions.values()) {
+      this.send(session.socket, envelope);
+    }
   }
 
   private send(socket: WebSocket, envelope: ServerToBrowserEnvelope): void {
@@ -471,4 +785,35 @@ function extractRequestId(payload: unknown): string {
     typeof payload.requestId === "string"
     ? payload.requestId
     : "";
+}
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null;
+}
+
+function isTerminalBridgeMessage(message: unknown): message is JsonRecord & { type: string } {
+  return (
+    isJsonRecord(message) &&
+    typeof message.type === "string" &&
+    (TERMINAL_ATTACH_MESSAGE_TYPES.has(message.type) ||
+      TERMINAL_CONTROL_MESSAGE_TYPES.has(message.type))
+  );
+}
+
+function readNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function stripInternalBridgeFields(message: JsonRecord): JsonRecord {
+  const {
+    [TERMINAL_TARGET_BROWSER_SESSION_ID_KEY]: _browserSessionId,
+    [TERMINAL_TARGET_BROWSER_TERMINAL_SESSION_ID_KEY]: _browserTerminalSessionId,
+    ...rest
+  } = message;
+  return rest;
 }

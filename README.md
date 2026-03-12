@@ -96,11 +96,10 @@ The shim behavior was derived by treating the shipped and minified `Codex.app` c
 
 Pocodex creates an HTTP server on the host machine and serves the patched webview from there. The browser loads the UI over HTTP, uses `/ipc-request` for host-style requests, and opens a live WebSocket session on `/session` for bridge traffic and worker messages.
 
-An optional token can gate the browser session. Pocodex currently supports one active browser session at a time, so opening a new browser replaces the previous one.
+An optional token can gate the browser session. Pocodex supports multiple concurrent browser sessions that share the same backend state.
 
 ## Current Limitations
 
-- Only one active browser session is supported at a time
 - Native desktop behaviors such as notifications, badge updates, context menus, power-save controls, and window mode controls are blocked or stubbed
 - Generic IPC coverage is incomplete; unsupported IPC methods return an error response
 - Streaming fetch is not implemented
