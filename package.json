@@ -45,6 +45,7 @@
     "build": "rm -rf dist && pnpm exec tsgo -p tsconfig.json && pnpm run build:static",
     "build:static": "mkdir -p dist/images && cp src/pocodex.css dist/pocodex.css && cp src/images/import.svg dist/images/import.svg",
     "check:site": "pnpm --filter pocodex-site check",
+    "check:commit": "pnpm run fmt:check && pnpm run lint && pnpm run typecheck",
     "build:tray": "pnpm --filter pocodex-tray build",
     "check": "pnpm run fmt:check && pnpm run lint && pnpm run typecheck && pnpm test",
     "commitmsg": "commitlint --edit",
@@ -90,7 +91,7 @@
   },
   "simple-git-hooks": {
     "commit-msg": "pnpm run commitmsg -- $1",
-    "pre-commit": "pnpm run check"
+    "pre-commit": "pnpm run check:commit"
   },
   "engines": {
     "node": ">=24"
