@@ -626,7 +626,7 @@ describe("AppServerBridge", () => {
     );
   });
 
-  it("opens the desktop import dialog for add-project host actions", async () => {
+  it("opens the host workspace dialog for add-project host actions", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -638,8 +638,86 @@ describe("AppServerBridge", () => {
     });
 
     expect(emittedMessages).toContainEqual({
-      type: "pocodex-open-desktop-import-dialog",
-      mode: "manual",
+      type: "pocodex-open-workspace-root-dialog",
+      mode: "add",
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "electron-pick-workspace-root-option",
+    });
+
+    expect(emittedMessages).toContainEqual({
+      type: "pocodex-open-workspace-root-dialog",
+      mode: "pick",
+    });
+
+    await bridge.close();
+  });
+
+  it("returns a host-filesystem validation error for missing project paths", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-roots-"));
+    tempDirs.push(tempDirectory);
+    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
+    const missingRoot = join(tempDirectory, "missing-project");
+
+    const bridge = await createBridge(children, {
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-add-missing-root",
+      method: "POST",
+      url: "vscode://codex/add-workspace-root-option",
+      body: JSON.stringify({
+        root: missingRoot,
+        setActive: false,
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-add-missing-root")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-add-missing-root")).toEqual({
+      success: false,
+      root: missingRoot,
+      error: "Project path does not exist on the host filesystem.",
+    });
+
+    await bridge.close();
+  });
+
+  it("opens the host workspace dialog when add-project is requested without a path", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-add-empty-root",
+      method: "POST",
+      url: "vscode://codex/add-workspace-root-option",
+      body: JSON.stringify({}),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-add-empty-root")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-add-empty-root")).toEqual({
+      success: false,
+      root: "",
+    });
+    expect(emittedMessages).toContainEqual({
+      type: "pocodex-open-workspace-root-dialog",
+      mode: "add",
     });
 
     await bridge.close();
@@ -702,9 +780,15 @@ describe("AppServerBridge", () => {
     const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-roots-"));
     tempDirs.push(tempDirectory);
     const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
+    const projectAlphaRoot = join(tempDirectory, "project-alpha");
+    await mkdir(projectAlphaRoot, { recursive: true });
 
     const firstBridge = await createBridge(children, {
       workspaceRootRegistryPath,
+    });
+    const firstBridgeMessages: unknown[] = [];
+    firstBridge.on("bridge_message", (message) => {
+      firstBridgeMessages.push(message);
     });
 
     await firstBridge.forwardBridgeMessage({
@@ -713,25 +797,32 @@ describe("AppServerBridge", () => {
       method: "POST",
       url: "vscode://codex/add-workspace-root-option",
       body: JSON.stringify({
-        root: TEST_PROJECT_ALPHA_ROOT,
+        root: projectAlphaRoot,
         setActive: false,
       }),
     });
 
+    await waitForCondition(() => Boolean(getFetchResponse(firstBridgeMessages, "fetch-add-root")));
+
+    expect(getFetchJsonBody(firstBridgeMessages, "fetch-add-root")).toEqual({
+      success: true,
+      root: projectAlphaRoot,
+    });
+
     await firstBridge.forwardBridgeMessage({
       type: "electron-rename-workspace-root-option",
-      root: TEST_PROJECT_ALPHA_ROOT,
+      root: projectAlphaRoot,
       label: "Project Alpha",
     });
 
     await firstBridge.forwardBridgeMessage({
       type: "electron-update-workspace-root-options",
-      roots: [TEST_PROJECT_ALPHA_ROOT, TEST_WORKSPACE_ROOT],
+      roots: [projectAlphaRoot, TEST_WORKSPACE_ROOT],
     });
 
     await firstBridge.forwardBridgeMessage({
       type: "electron-set-active-workspace-root",
-      root: TEST_PROJECT_ALPHA_ROOT,
+      root: projectAlphaRoot,
     });
 
     await firstBridge.close();
@@ -768,13 +859,13 @@ describe("AppServerBridge", () => {
     await waitForCondition(() => emittedMessages.length >= 2);
 
     expect(getFetchJsonBody(emittedMessages, "fetch-active-roots")).toEqual({
-      roots: [TEST_PROJECT_ALPHA_ROOT, TEST_WORKSPACE_ROOT],
+      roots: [projectAlphaRoot, TEST_WORKSPACE_ROOT],
     });
 
     expect(getFetchJsonBody(emittedMessages, "fetch-root-options")).toEqual({
-      roots: [TEST_PROJECT_ALPHA_ROOT, TEST_WORKSPACE_ROOT],
+      roots: [projectAlphaRoot, TEST_WORKSPACE_ROOT],
       labels: {
-        [TEST_PROJECT_ALPHA_ROOT]: "Project Alpha",
+        [projectAlphaRoot]: "Project Alpha",
         [TEST_WORKSPACE_ROOT]: "pocodex",
       },
     });
@@ -892,6 +983,76 @@ describe("AppServerBridge", () => {
             activeInCodex: true,
             alreadyImported: false,
             available: true,
+          },
+        ],
+      },
+    });
+
+    await bridge.close();
+  });
+
+  it("starts the host workspace browser in the user directory", async () => {
+    const bridge = await createBridge(children);
+
+    const response = await bridge.handleIpcRequest({
+      requestId: "ipc-workspace-browser-home",
+      method: "workspace-root-browser/list",
+    });
+
+    expect(response).toMatchObject({
+      requestId: "ipc-workspace-browser-home",
+      type: "response",
+      resultType: "success",
+      result: {
+        root: expect.any(String),
+        homeDir: expect.any(String),
+        entries: expect.any(Array),
+      },
+    });
+    const result = (
+      response as {
+        result?: { root?: string; parentRoot?: string | null; homeDir?: string };
+      }
+    ).result;
+    expect(result?.root).toBe(result?.homeDir);
+    expect(result?.parentRoot === null || typeof result?.parentRoot === "string").toBe(true);
+
+    await bridge.close();
+  });
+
+  it("lists only directories for the requested host workspace folder", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-browser-"));
+    tempDirs.push(tempDirectory);
+    await mkdir(join(tempDirectory, "Alpha"), { recursive: true });
+    await mkdir(join(tempDirectory, "beta"), { recursive: true });
+    await writeFile(join(tempDirectory, "notes.txt"), "not a folder\n", "utf8");
+
+    const bridge = await createBridge(children);
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-workspace-browser-list",
+        method: "workspace-root-browser/list",
+        params: {
+          root: tempDirectory,
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-workspace-browser-list",
+      type: "response",
+      resultType: "success",
+      result: {
+        root: tempDirectory,
+        parentRoot: join(tempDirectory, ".."),
+        homeDir: expect.any(String),
+        entries: [
+          {
+            name: "Alpha",
+            path: join(tempDirectory, "Alpha"),
+          },
+          {
+            name: "beta",
+            path: join(tempDirectory, "beta"),
           },
         ],
       },
@@ -1682,6 +1843,9 @@ async function writeWorkspaceRootRegistry(
 
 async function runExecFile(file: string, args: string[], cwd?: string): Promise<string> {
   const { execFile } = await import("node:child_process");
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+  );
   return new Promise<string>((resolveOutput, reject) => {
     execFile(
       file,
@@ -1689,6 +1853,7 @@ async function runExecFile(file: string, args: string[], cwd?: string): Promise<
       {
         cwd,
         encoding: "utf8",
+        env,
       },
       (error, stdout) => {
         if (error) {

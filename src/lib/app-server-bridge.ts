@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -303,8 +304,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         await this.handleOnboardingSkipWorkspace();
         return;
       case "electron-pick-workspace-root-option":
+        this.openWorkspaceRootDialog("pick");
+        return;
       case "electron-add-new-workspace-root-option":
-        this.openDesktopImportDialog("manual");
+        this.openWorkspaceRootDialog("add");
         return;
       case "electron-update-workspace-root-options":
         await this.handleWorkspaceRootsUpdated(message);
@@ -441,6 +444,16 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           return buildIpcSuccessResponse(
             requestId,
             await this.dismissDesktopWorkspaceImportPrompt(),
+          );
+        case "workspace-root-browser/list":
+          return buildIpcSuccessResponse(
+            requestId,
+            await this.listWorkspaceRootBrowserDirectory(payload.params),
+          );
+        case "workspace-root-option/add":
+          return buildIpcSuccessResponse(
+            requestId,
+            await this.addWorkspaceRootOption(payload.params),
           );
         default:
           return buildIpcErrorResponse(
@@ -651,6 +664,69 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     await this.persistWorkspaceRootRegistry();
     return {
       promptSeen: this.desktopImportPromptSeen,
+    };
+  }
+
+  private async listWorkspaceRootBrowserDirectory(params: unknown): Promise<{
+    root: string;
+    parentRoot: string | null;
+    homeDir: string;
+    entries: Array<{
+      name: string;
+      path: string;
+    }>;
+  }> {
+    const homeDir = homedir();
+    const requestedRoot =
+      isJsonRecord(params) && typeof params.root === "string" ? params.root.trim() : "";
+    const root = resolve(requestedRoot || homeDir);
+    const rootValidationError = await this.getWorkspaceRootValidationError(root);
+    if (rootValidationError) {
+      throw new Error(rootValidationError);
+    }
+
+    const dirents = await readdir(root, {
+      withFileTypes: true,
+    });
+    const entries: Array<{
+      name: string;
+      path: string;
+    }> = [];
+
+    for (const dirent of dirents) {
+      const entryPath = join(root, dirent.name);
+      if (dirent.isDirectory()) {
+        entries.push({
+          name: dirent.name,
+          path: entryPath,
+        });
+        continue;
+      }
+
+      if (!dirent.isSymbolicLink()) {
+        continue;
+      }
+
+      try {
+        if ((await stat(entryPath)).isDirectory()) {
+          entries.push({
+            name: dirent.name,
+            path: entryPath,
+          });
+        }
+      } catch {
+        // Ignore broken or inaccessible symlinks in the browser listing.
+      }
+    }
+
+    entries.sort((left, right) => compareWorkspaceRootBrowserEntries(left, right));
+
+    const parentRootCandidate = resolve(root, "..");
+    return {
+      root,
+      parentRoot: parentRootCandidate === root ? null : parentRootCandidate,
+      homeDir,
+      entries,
     };
   }
 
@@ -1495,20 +1571,34 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     return {};
   }
 
-  private async addWorkspaceRootOption(body: unknown): Promise<{ success: boolean; root: string }> {
-    const root = isJsonRecord(body) && typeof body.root === "string" ? body.root : null;
+  private async addWorkspaceRootOption(body: unknown): Promise<{
+    success: boolean;
+    root: string;
+    error?: string;
+  }> {
+    const root = isJsonRecord(body) && typeof body.root === "string" ? body.root.trim() : null;
     const label = isJsonRecord(body) && typeof body.label === "string" ? body.label : null;
     const setActive = !isJsonRecord(body) || body.setActive !== false;
 
     if (!root) {
-      this.openDesktopImportDialog("manual");
+      this.openWorkspaceRootDialog("add");
       return {
         success: false,
         root: "",
       };
     }
 
-    this.ensureWorkspaceRoot(root, {
+    const normalizedRoot = resolve(root);
+    const validationError = await this.getWorkspaceRootValidationError(normalizedRoot);
+    if (validationError) {
+      return {
+        success: false,
+        root: normalizedRoot,
+        error: validationError,
+      };
+    }
+
+    this.ensureWorkspaceRoot(normalizedRoot, {
       label,
       setActive,
     });
@@ -1516,8 +1606,27 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.emitWorkspaceRootsUpdated();
     return {
       success: true,
-      root,
+      root: normalizedRoot,
     };
+  }
+
+  private async getWorkspaceRootValidationError(root: string): Promise<string | null> {
+    try {
+      const stats = await stat(root);
+      if (!stats.isDirectory()) {
+        return "Project path must point to a directory on the host filesystem.";
+      }
+      return null;
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? String((error as { code?: unknown }).code ?? "")
+          : "";
+      if (code === "ENOENT") {
+        return "Project path does not exist on the host filesystem.";
+      }
+      return `Failed to access project path on the host filesystem: ${normalizeError(error).message}`;
+    }
   }
 
   private applyWorkspaceRootRegistry(state: WorkspaceRootRegistryState): void {
@@ -1627,6 +1736,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
   }
 
+  private openWorkspaceRootDialog(mode: "add" | "pick"): void {
+    this.emitBridgeMessage({
+      type: "pocodex-open-workspace-root-dialog",
+      mode,
+    });
+  }
+
   private getSharedObjectKey(message: JsonRecord): string | null {
     const candidates = [message.key, message.name, message.objectKey, message.objectName];
     for (const candidate of candidates) {
@@ -1730,6 +1846,22 @@ function buildIpcSuccessResponse(requestId: string, result: unknown): JsonRecord
     resultType: "success",
     result,
   };
+}
+
+function compareWorkspaceRootBrowserEntries(
+  left: { name: string },
+  right: { name: string },
+): number {
+  const leftHidden = left.name.startsWith(".");
+  const rightHidden = right.name.startsWith(".");
+  if (leftHidden !== rightHidden) {
+    return leftHidden ? 1 : -1;
+  }
+
+  return left.name.localeCompare(right.name, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
 }
 
 async function resolveGitOrigins(
