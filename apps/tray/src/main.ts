@@ -1,8 +1,8 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
-import todesktop from "@todesktop/runtime";
 import {
   Menu,
   Tray,
@@ -21,6 +21,8 @@ import {
 } from "pocodex";
 
 import { chooseCodexAppPath } from "./app-path.js";
+import { getClipboardUrl } from "./copy-url.js";
+import { shouldInitTodesktopRuntime } from "./todesktop-runtime.js";
 import {
   applySelectedCodexAppPath,
   buildRuntimeOptions,
@@ -34,7 +36,17 @@ import {
 } from "./config.js";
 import { buildTrayMenuTemplate, type TrayMenuHandlers } from "./menu.js";
 
-todesktop.init();
+const require = createRequire(import.meta.url);
+const shouldLoadTodesktopRuntime = shouldInitTodesktopRuntime({
+  enableRuntimeEnv: process.env.POCODEX_ENABLE_TODESKTOP_RUNTIME,
+  isPackaged: app.isPackaged,
+  smokeTestEnv: process.env.TODESKTOP_SMOKE_TEST,
+});
+
+if (shouldLoadTodesktopRuntime) {
+  const todesktop = require("@todesktop/runtime");
+  todesktop.init();
+}
 
 let config = getDefaultTrayConfig();
 let configPath = "";
@@ -68,7 +80,11 @@ process.on("unhandledRejection", (reason) => {
 });
 
 logStartup("main module loaded");
-logStartup("todesktop runtime initialized");
+logStartup(
+  shouldLoadTodesktopRuntime
+    ? "todesktop runtime initialized"
+    : "todesktop runtime skipped for local development",
+);
 
 app.on("window-all-closed", () => {
   // Tray app stays resident without any BrowserWindow instances.
@@ -172,13 +188,15 @@ function rebuildMenu(): void {
       void updateCodexAppPath();
     },
     copyLanUrl: () => {
-      if (snapshot.networkUrl) {
-        clipboard.writeText(snapshot.networkUrl);
+      const url = getClipboardUrl(snapshot, "network");
+      if (url) {
+        clipboard.writeText(url);
       }
     },
     copyLocalUrl: () => {
-      if (snapshot.localUrl) {
-        clipboard.writeText(snapshot.localUrl);
+      const url = getClipboardUrl(snapshot, "local");
+      if (url) {
+        clipboard.writeText(url);
       }
     },
     openPocodex: () => {

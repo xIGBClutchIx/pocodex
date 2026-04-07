@@ -15,7 +15,7 @@
     "build": "pnpm run build:assets && pnpm run build:deps && rm -rf dist && pnpm exec tsgo -p tsconfig.json",
     "build:assets": "node ./scripts/build-tray-assets.mjs",
     "build:deps": "node ./scripts/build-pocodex-workspace.mjs",
-    "dev": "pnpm run build && electron ./dist/main.js",
+    "dev": "pnpm run build && env -u TODESKTOP_SMOKE_TEST electron ./dist/main.js",
     "start": "pnpm run dev"
   },
   "dependencies": {
