@@ -80,7 +80,7 @@ jobs:
       - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
         run: pnpm --filter pocodex-tray build
       - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
-        run: pnpm exec todesktop build --config apps/tray/todesktop.json --async --ephemeral
+        run: pnpm --filter pocodex-tray exec todesktop build --config todesktop.json --async --ephemeral
 
   build-todesktop-manual:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_todesktop_build }}
@@ -110,4 +110,4 @@ jobs:
       - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
         run: pnpm --filter pocodex-tray build
       - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
-        run: pnpm exec todesktop build --config apps/tray/todesktop.json --async --ephemeral
+        run: pnpm --filter pocodex-tray exec todesktop build --config todesktop.json --async --ephemeral
