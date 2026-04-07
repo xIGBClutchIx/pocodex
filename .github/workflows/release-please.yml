@@ -44,3 +44,29 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: npm publish --access public
+
+  build-todesktop:
+    if: >-
+      ${{
+        needs.release-please.outputs.release_created == 'true' &&
+        secrets.TODESKTOP_ACCESS_TOKEN != '' &&
+        secrets.TODESKTOP_EMAIL != ''
+      }}
+    needs: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
+      TODESKTOP_EMAIL: ${{ secrets.TODESKTOP_EMAIL }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter pocodex-tray build
+      - run: pnpm exec todesktop build --config apps/tray/todesktop.json --async --ephemeral
