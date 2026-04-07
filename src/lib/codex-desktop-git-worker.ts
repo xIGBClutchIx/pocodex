@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { Worker } from "node:worker_threads";
 
 import { ensureCodexDesktopWorkerScript, type CodexDesktopWorkerScript } from "./codex-bundle.js";
-import { debugLog } from "./debug.js";
+import { debugLog, isDebugEnabled } from "./debug.js";
 
 interface WorkerResponseResultError {
   message: string;
@@ -165,7 +165,7 @@ export class DefaultCodexDesktopGitWorkerBridge
           buildNumber: script.metadata.buildNumber,
           codexAppSessionId: this.codexAppSessionId,
         },
-        maxLogLevel: process.env.POCODEX_DEBUG ? "debug" : "warning",
+        maxLogLevel: isDebugEnabled("git-worker") ? "debug" : "warning",
         sentryRewriteFramesRoot: script.metadata.appPath,
         spawnInsideWsl: false,
       },

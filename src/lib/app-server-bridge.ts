@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -43,10 +43,43 @@ interface AppServerBridgeOptions {
   appPath: string;
   cwd: string;
   hostId?: string;
+  codexHomePath?: string;
   codexDesktopGlobalStatePath?: string;
   persistedAtomRegistryPath?: string;
   workspaceRootRegistryPath?: string;
   gitWorkerBridge?: CodexDesktopGitWorkerBridge;
+}
+
+interface WhamUsageCredits {
+  has_credits: boolean;
+  unlimited: boolean;
+  balance: number | null;
+}
+
+interface WhamUsageWindow {
+  used_percent: number;
+  limit_window_seconds: number | null;
+  reset_at: number | null;
+}
+
+interface WhamUsageRateLimit {
+  allowed: boolean;
+  limit_reached: boolean;
+  rate_limit_name: string | null;
+  primary_window: WhamUsageWindow | null;
+  secondary_window: WhamUsageWindow | null;
+}
+
+interface WhamUsageAdditionalRateLimit {
+  limit_name: string;
+  rate_limit: WhamUsageRateLimit;
+}
+
+interface WhamUsageResponse {
+  credits: WhamUsageCredits | null;
+  plan_type: string | null;
+  rate_limit: WhamUsageRateLimit | null;
+  additional_rate_limits: WhamUsageAdditionalRateLimit[];
 }
 
 interface JsonRpcRequest {
@@ -135,6 +168,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly workspaceRoots = new Set<string>();
   private readonly workspaceRootLabels = new Map<string, string>();
   private readonly codexDesktopGlobalStatePath: string;
+  private readonly codexHomePath: string;
   private readonly persistedAtomRegistryPath: string;
   private readonly workspaceRootRegistryPath: string;
   private readonly gitWorkerBridge: CodexDesktopGitWorkerBridge;
@@ -160,6 +194,8 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     super();
     this.hostId = options.hostId ?? "local";
     this.cwd = options.cwd;
+    this.codexHomePath =
+      options.codexHomePath ?? process.env.CODEX_HOME ?? join(homedir(), ".codex");
     this.codexDesktopGlobalStatePath =
       options.codexDesktopGlobalStatePath ?? deriveCodexDesktopGlobalStatePath();
     this.persistedAtomRegistryPath =
@@ -887,6 +923,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       return;
     }
 
+    if (message.url === "/wham/usage") {
+      debugLog("status", "received /wham/usage fetch", {
+        requestId: message.requestId,
+        method: typeof message.method === "string" ? message.method : "GET",
+      });
+    }
+
     const controller = new AbortController();
     this.fetchRequests.set(message.requestId, controller);
 
@@ -916,6 +959,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       if (message.url.startsWith("/")) {
         const handled = await this.handleRelativeFetchRequest(message.url);
         if (handled) {
+          if (message.url === "/wham/usage") {
+            debugLog(
+              "status",
+              "served local /wham/usage response",
+              summarizeWhamUsageResponse(handled.body),
+            );
+          }
           this.emitFetchSuccess(message.requestId, handled.body, handled.status);
           return;
         }
@@ -1231,7 +1281,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         return {
           status: 200,
           body: {
-            codexHome: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+            codexHome: this.codexHomePath,
           },
         };
       case "list-automations":
@@ -1380,11 +1430,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     if (url === "/wham/usage") {
       return {
         status: 200,
-        body: {
-          credits: null,
-          plan_type: null,
-          rate_limit: null,
-        },
+        body: await readWhamUsageFromCodexHome(this.codexHomePath),
       };
     }
 
@@ -1862,6 +1908,405 @@ function compareWorkspaceRootBrowserEntries(
     numeric: true,
     sensitivity: "base",
   });
+}
+
+async function readWhamUsageFromCodexHome(codexHomePath: string): Promise<WhamUsageResponse> {
+  debugLog("status", "reading /wham/usage from codex home", {
+    codexHomePath,
+  });
+  const authMetadata = await readCodexAuthMetadata(codexHomePath);
+  const sessionSnapshot = await readLatestCodexRateLimitSnapshot(codexHomePath);
+  const baseUsage = buildWhamUsageResponse(sessionSnapshot, authMetadata);
+
+  debugLog("status", "resolved /wham/usage inputs", {
+    authPlanType: authMetadata?.planType ?? null,
+    snapshot: summarizeRateLimitSnapshot(sessionSnapshot),
+    response: summarizeWhamUsageResponse(baseUsage),
+  });
+
+  if (baseUsage.rate_limit || baseUsage.plan_type || baseUsage.credits) {
+    return baseUsage;
+  }
+
+  return {
+    credits: null,
+    plan_type: null,
+    rate_limit: null,
+    additional_rate_limits: [],
+  };
+}
+
+async function readCodexAuthMetadata(
+  codexHomePath: string,
+): Promise<{ planType: string | null } | null> {
+  try {
+    const authJson = JSON.parse(
+      await readFile(join(codexHomePath, "auth.json"), "utf8"),
+    ) as unknown;
+    if (!isJsonRecord(authJson) || !isJsonRecord(authJson.tokens)) {
+      return null;
+    }
+
+    const accessToken =
+      typeof authJson.tokens.access_token === "string" ? authJson.tokens.access_token : null;
+    if (!accessToken) {
+      return null;
+    }
+
+    const payload = decodeJwtPayload(accessToken);
+    if (!payload) {
+      return null;
+    }
+
+    const authPayload = isJsonRecord(payload["https://api.openai.com/auth"])
+      ? payload["https://api.openai.com/auth"]
+      : null;
+
+    return {
+      planType:
+        authPayload && typeof authPayload.chatgpt_plan_type === "string"
+          ? authPayload.chatgpt_plan_type
+          : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function decodeJwtPayload(token: string): JsonRecord | null {
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as unknown;
+    return isJsonRecord(payload) ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readLatestCodexRateLimitSnapshot(codexHomePath: string): Promise<JsonRecord | null> {
+  const sessionFiles = await listRecentCodexSessionFiles(join(codexHomePath, "sessions"), 8);
+  debugLog("status", "scanning codex session files for rate limits", {
+    sessionFileCount: sessionFiles.length,
+    sessionFiles,
+  });
+  for (const sessionFile of sessionFiles) {
+    const snapshot = await readLatestRateLimitSnapshotFromSessionFile(sessionFile);
+    if (snapshot) {
+      debugLog("status", "selected codex rate-limit snapshot", {
+        sessionFile,
+        snapshot: summarizeRateLimitSnapshot(snapshot),
+      });
+      return snapshot;
+    }
+  }
+
+  debugLog("status", "no codex rate-limit snapshot found");
+  return null;
+}
+
+async function listRecentCodexSessionFiles(root: string, limit: number): Promise<string[]> {
+  const files: string[] = [];
+
+  async function visit(directory: string): Promise<void> {
+    if (files.length >= limit) {
+      return;
+    }
+
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true, encoding: "utf8" });
+    } catch {
+      return;
+    }
+
+    const sorted = [...entries].sort((left, right) => right.name.localeCompare(left.name));
+    for (const entry of sorted) {
+      if (files.length >= limit) {
+        return;
+      }
+
+      const entryPath = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(entryPath);
+        continue;
+      }
+
+      if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        files.push(entryPath);
+      }
+    }
+  }
+
+  await visit(root);
+  return files;
+}
+
+async function readLatestRateLimitSnapshotFromSessionFile(
+  sessionFile: string,
+): Promise<JsonRecord | null> {
+  let rawSession = "";
+  try {
+    rawSession = await readFile(sessionFile, "utf8");
+  } catch {
+    return null;
+  }
+
+  const lines = rawSession.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (!line) {
+      continue;
+    }
+
+    try {
+      const entry = JSON.parse(line) as unknown;
+      const snapshot = extractRateLimitSnapshot(entry);
+      if (snapshot) {
+        return snapshot;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function extractRateLimitSnapshot(entry: unknown): JsonRecord | null {
+  if (!isJsonRecord(entry) || entry.type !== "event_msg" || !isJsonRecord(entry.payload)) {
+    return null;
+  }
+
+  const payload = entry.payload;
+  if (payload.type !== "token_count" || !isJsonRecord(payload.rate_limits)) {
+    return null;
+  }
+
+  return payload.rate_limits;
+}
+
+function buildWhamUsageResponse(
+  snapshot: JsonRecord | null,
+  authMetadata: { planType: string | null } | null,
+): WhamUsageResponse {
+  const credits = mapWhamUsageCredits(snapshot?.credits);
+  const planType =
+    typeof snapshot?.plan_type === "string" ? snapshot.plan_type : (authMetadata?.planType ?? null);
+  const primaryWindow = mapWhamUsageWindow(snapshot?.primary);
+  const secondaryWindow = mapWhamUsageWindow(snapshot?.secondary);
+  const topLevelRateLimit =
+    primaryWindow || secondaryWindow
+      ? {
+          allowed: coerceAllowed(snapshot, [primaryWindow, secondaryWindow]),
+          limit_reached: coerceLimitReached(snapshot, [primaryWindow, secondaryWindow]),
+          rate_limit_name:
+            typeof snapshot?.limit_name === "string"
+              ? snapshot.limit_name
+              : typeof snapshot?.rate_limit_name === "string"
+                ? snapshot.rate_limit_name
+                : null,
+          primary_window: primaryWindow,
+          secondary_window: secondaryWindow,
+        }
+      : null;
+
+  const additionalRateLimits = Array.isArray(snapshot?.additional_rate_limits)
+    ? snapshot.additional_rate_limits
+        .map(mapWhamAdditionalRateLimit)
+        .filter((value): value is WhamUsageAdditionalRateLimit => value !== null)
+    : [];
+
+  return {
+    credits,
+    plan_type: planType,
+    rate_limit: topLevelRateLimit,
+    additional_rate_limits: additionalRateLimits,
+  };
+}
+
+function mapWhamAdditionalRateLimit(value: unknown): WhamUsageAdditionalRateLimit | null {
+  if (!isJsonRecord(value)) {
+    return null;
+  }
+
+  const limitName = typeof value.limit_name === "string" ? value.limit_name.trim() : "";
+  if (!limitName) {
+    return null;
+  }
+
+  const rateLimitRecord = isJsonRecord(value.rate_limit) ? value.rate_limit : value;
+  const primaryWindow = mapWhamUsageWindow(
+    rateLimitRecord.primary ?? rateLimitRecord.primary_window,
+  );
+  const secondaryWindow = mapWhamUsageWindow(
+    rateLimitRecord.secondary ?? rateLimitRecord.secondary_window,
+  );
+
+  if (!primaryWindow && !secondaryWindow) {
+    return null;
+  }
+
+  return {
+    limit_name: limitName,
+    rate_limit: {
+      allowed: coerceAllowed(rateLimitRecord, [primaryWindow, secondaryWindow]),
+      limit_reached: coerceLimitReached(rateLimitRecord, [primaryWindow, secondaryWindow]),
+      rate_limit_name: limitName,
+      primary_window: primaryWindow,
+      secondary_window: secondaryWindow,
+    },
+  };
+}
+
+function mapWhamUsageCredits(value: unknown): WhamUsageCredits | null {
+  if (!isJsonRecord(value)) {
+    return null;
+  }
+
+  return {
+    has_credits: value.has_credits === true,
+    unlimited: value.unlimited === true,
+    balance: typeof value.balance === "number" ? value.balance : null,
+  };
+}
+
+function mapWhamUsageWindow(value: unknown): WhamUsageWindow | null {
+  if (!isJsonRecord(value)) {
+    return null;
+  }
+
+  const usedPercent =
+    typeof value.used_percent === "number"
+      ? value.used_percent
+      : typeof value.usedPercent === "number"
+        ? value.usedPercent
+        : null;
+  if (usedPercent === null) {
+    return null;
+  }
+
+  let limitWindowSeconds: number | null = null;
+  if (typeof value.limit_window_seconds === "number") {
+    limitWindowSeconds = value.limit_window_seconds;
+  } else if (typeof value.window_minutes === "number") {
+    limitWindowSeconds = value.window_minutes * 60;
+  }
+
+  const resetAt =
+    typeof value.reset_at === "number"
+      ? value.reset_at
+      : typeof value.resets_at === "number"
+        ? value.resets_at
+        : null;
+
+  return {
+    used_percent: usedPercent,
+    limit_window_seconds: limitWindowSeconds,
+    reset_at: resetAt,
+  };
+}
+
+function coerceAllowed(
+  snapshot: JsonRecord | null,
+  windows: Array<WhamUsageWindow | null>,
+): boolean {
+  if (snapshot && typeof snapshot.allowed === "boolean") {
+    return snapshot.allowed;
+  }
+
+  return !coerceLimitReached(snapshot, windows);
+}
+
+function coerceLimitReached(
+  snapshot: JsonRecord | null,
+  windows: Array<WhamUsageWindow | null>,
+): boolean {
+  if (snapshot && typeof snapshot.limit_reached === "boolean") {
+    return snapshot.limit_reached;
+  }
+
+  const maxUsedPercent = windows.reduce(
+    (highest, window) => (window ? Math.max(highest, window.used_percent) : highest),
+    0,
+  );
+  return maxUsedPercent >= 100;
+}
+
+function summarizeRateLimitSnapshot(snapshot: JsonRecord | null): Record<string, unknown> | null {
+  if (!snapshot) {
+    return null;
+  }
+
+  return {
+    limitId: typeof snapshot.limit_id === "string" ? snapshot.limit_id : null,
+    limitName:
+      typeof snapshot.limit_name === "string"
+        ? snapshot.limit_name
+        : typeof snapshot.rate_limit_name === "string"
+          ? snapshot.rate_limit_name
+          : null,
+    planType: typeof snapshot.plan_type === "string" ? snapshot.plan_type : null,
+    primary: summarizeSnapshotWindow(snapshot.primary),
+    secondary: summarizeSnapshotWindow(snapshot.secondary),
+    hasCredits: isJsonRecord(snapshot.credits) ? snapshot.credits.has_credits === true : null,
+  };
+}
+
+function summarizeSnapshotWindow(windowValue: unknown): Record<string, unknown> | null {
+  if (!isJsonRecord(windowValue)) {
+    return null;
+  }
+
+  return {
+    usedPercent:
+      typeof windowValue.used_percent === "number"
+        ? windowValue.used_percent
+        : typeof windowValue.usedPercent === "number"
+          ? windowValue.usedPercent
+          : null,
+    windowMinutes:
+      typeof windowValue.window_minutes === "number"
+        ? windowValue.window_minutes
+        : typeof windowValue.limit_window_seconds === "number"
+          ? windowValue.limit_window_seconds / 60
+          : null,
+    resetAt:
+      typeof windowValue.resets_at === "number"
+        ? windowValue.resets_at
+        : typeof windowValue.reset_at === "number"
+          ? windowValue.reset_at
+          : null,
+  };
+}
+
+function summarizeWhamUsageResponse(body: unknown): Record<string, unknown> | null {
+  if (!isJsonRecord(body)) {
+    return null;
+  }
+
+  return {
+    planType: typeof body.plan_type === "string" ? body.plan_type : null,
+    hasCredits: isJsonRecord(body.credits) ? body.credits.has_credits === true : null,
+    rateLimit: isJsonRecord(body.rate_limit)
+      ? {
+          allowed: body.rate_limit.allowed === true,
+          limitReached: body.rate_limit.limit_reached === true,
+          rateLimitName:
+            typeof body.rate_limit.rate_limit_name === "string"
+              ? body.rate_limit.rate_limit_name
+              : null,
+          primary: summarizeSnapshotWindow(body.rate_limit.primary_window),
+          secondary: summarizeSnapshotWindow(body.rate_limit.secondary_window),
+        }
+      : null,
+    additionalRateLimitCount: Array.isArray(body.additional_rate_limits)
+      ? body.additional_rate_limits.length
+      : 0,
+  };
 }
 
 async function resolveGitOrigins(
