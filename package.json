@@ -7,7 +7,8 @@
     "cli",
     "codex",
     "macos",
-    "openai"
+    "openai",
+    "wsl"
   ],
   "homepage": "https://www.pocodex.app",
   "license": "Apache-2.0",
@@ -29,7 +30,8 @@
     "README.md"
   ],
   "os": [
-    "darwin"
+    "darwin",
+    "linux"
   ],
   "type": "module",
   "main": "./dist/index.js",
@@ -49,9 +51,10 @@
     "build:tray": "pnpm --filter pocodex-tray build",
     "check": "pnpm run fmt:check && pnpm run lint && pnpm run typecheck && pnpm test",
     "commitmsg": "commitlint --edit",
-    "dev": "tsx src/cli.ts",
+    "dev": "tsx src/cli.ts --dev",
     "dev:site": "pnpm --filter pocodex-site dev",
     "dev:tray": "pnpm --filter pocodex-tray dev",
+    "dev:watch": "tsx watch src/cli.ts --dev",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint --deny-warnings .",
@@ -66,8 +69,10 @@
   "dependencies": {
     "@electron/asar": "^4.1.0",
     "mime-types": "^3.0.2",
+    "node-gyp": "^12.2.0",
     "node-pty": "^1.1.0",
     "plist": "^3.1.0",
+    "smol-toml": "^1.6.1",
     "ws": "^8.19.0"
   },
   "devDependencies": {

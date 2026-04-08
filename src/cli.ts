@@ -1,17 +1,41 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
+import { watch } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { basename, dirname } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULT_POCODEX_APP_PATH, createPocodexRuntime } from "./index.js";
-import type { ServeCommandOptions } from "./lib/protocol.js";
+import { AppServerBridge } from "./lib/app-server-bridge.js";
+import { normalizeCliArgv } from "./lib/cli-args.js";
+import { loadCodexBundle, resolveDefaultCodexAppPath } from "./lib/codex-bundle.js";
+import { renderBootstrapScript } from "./lib/bootstrap-script.js";
+import { patchIndexHtml } from "./lib/html-patcher.js";
+import { parseListenAddress } from "./lib/listen-address.js";
+import { renderPwaHeadTags, renderServiceWorkerScript, renderWebManifest } from "./lib/pwa.js";
+import type { SentryInitOptions, ServeCommandOptions } from "./lib/protocol.js";
+import { getServeUrls } from "./lib/serve-url.js";
+import { PocodexServer } from "./lib/server.js";
+import {
+  deriveLastUsedCodexBuildPath,
+  formatCodexBuildSignature,
+  recordUsedCodexBuild,
+} from "./lib/used-codex-build.js";
 
 const DEFAULT_LISTEN = "127.0.0.1:8787";
+const POCODEX_BACKGROUND_COLOR = "#111827";
+const POCODEX_MANIFEST_HREF = "/manifest.webmanifest";
+const POCODEX_PWA_APP_NAME = "Pocodex";
+const POCODEX_PWA_DESCRIPTION = "Run the Codex desktop webview in an installable browser shell.";
+const POCODEX_SERVICE_WORKER_HREF = "/service-worker.js";
+const POCODEX_STYLESHEET_HREF = "/pocodex.css";
+const POCODEX_THEME_COLOR = "#111827";
 const FLAG_NAMES_WITH_VALUES = new Set(["--app", "--listen", "--token"]);
 const BOOLEAN_FLAG_NAMES = new Set(["--dev"]);
 
 async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+  const argv = normalizeCliArgv(process.argv.slice(2));
   const command = argv[0];
 
   if (command === "help" || command === "--help" || command === "-h") {
@@ -31,19 +55,77 @@ async function main(): Promise<void> {
     return;
   }
 
-  const options = parseServeCommand(serveArgv);
+  const options = await parseServeCommand(serveArgv);
   const pocodexCssPath = fileURLToPath(new URL("./pocodex.css", import.meta.url));
-  const runtime = createPocodexRuntime({
-    ...options,
+  const importIconSvgPath = fileURLToPath(new URL("./images/import.svg", import.meta.url));
+  const bundle = await loadCodexBundle(options.appPath);
+  const usedCodexBuild = await recordUsedCodexBuild(deriveLastUsedCodexBuildPath(), {
+    version: bundle.version,
+    buildFlavor: bundle.buildFlavor,
+    buildNumber: bundle.buildNumber,
+  }).catch(() => null);
+  const relay = await AppServerBridge.connect({
+    appPath: options.appPath,
     cwd: process.cwd(),
   });
-  runtime.on("error", (error) => {
-    console.error(error.message);
+
+  const sentryOptions: SentryInitOptions = {
+    buildFlavor: bundle.buildFlavor,
+    appVersion: bundle.version,
+    buildNumber: bundle.buildNumber,
+    codexAppSessionId: randomUUID(),
+  };
+  const pwaConfig = {
+    appName: POCODEX_PWA_APP_NAME,
+    shortName: POCODEX_PWA_APP_NAME,
+    description: POCODEX_PWA_DESCRIPTION,
+    themeColor: POCODEX_THEME_COLOR,
+    backgroundColor: POCODEX_BACKGROUND_COLOR,
+    manifestPath: POCODEX_MANIFEST_HREF,
+    iconHref: bundle.faviconHref,
+  };
+
+  const server = new PocodexServer({
+    listenHost: options.listenHost,
+    listenPort: options.listenPort,
+    token: options.token,
+    relay,
+    webviewRoot: bundle.webviewRoot,
+    readPocodexStylesheet: async () => readFile(pocodexCssPath, "utf8"),
+    renderIndexHtml: async () => {
+      const indexHtml = await bundle.readIndexHtml();
+      return patchIndexHtml(indexHtml, {
+        bootstrapScript: renderBootstrapScript({
+          devMode: options.devMode,
+          sentryOptions,
+          stylesheetHref: POCODEX_STYLESHEET_HREF,
+          importIconSvg: await readFile(importIconSvgPath, "utf8"),
+        }),
+        faviconHref: bundle.faviconHref,
+        headTags: renderPwaHeadTags(pwaConfig),
+        stylesheetHref: POCODEX_STYLESHEET_HREF,
+      });
+    },
+    renderWebManifest: async () => renderWebManifest(pwaConfig),
+    renderServiceWorkerScript: async () =>
+      renderServiceWorkerScript({
+        cacheName: `pocodex-shell:${bundle.version}:${bundle.buildNumber}`,
+        indexPath: "/index.html",
+        serviceWorkerPath: POCODEX_SERVICE_WORKER_HREF,
+      }),
   });
+
+  const stopWatchingStylesheet = options.devMode
+    ? watchPocodexStylesheet(pocodexCssPath, () => {
+        server.notifyStylesheetReload(String(Date.now()));
+      })
+    : () => {};
 
   const shutdown = async (signal: string) => {
     console.log(`\nShutting down Pocodex after ${signal}...`);
-    await runtime.stop();
+    stopWatchingStylesheet();
+    await server.close();
+    await relay.close();
     process.exit(0);
   };
 
@@ -54,50 +136,56 @@ async function main(): Promise<void> {
     void shutdown("SIGTERM");
   });
 
-  const snapshot = await runtime.start();
+  await server.listen();
+  const listeningAddress = server.getAddress();
+  const serveUrls = getServeUrls({
+    listenHost: options.listenHost,
+    listenPort: listeningAddress.port,
+    token: options.token,
+  });
 
-  if (!snapshot.localUrl || !snapshot.localOpenUrl) {
-    throw new Error("Pocodex started without a local URL.");
-  }
-
-  console.log(`Pocodex listening on ${snapshot.localUrl}`);
-  console.log(`Open ${snapshot.localOpenUrl}`);
-  if (snapshot.networkUrl && snapshot.networkOpenUrl) {
-    console.log(`Local network URL ${snapshot.networkUrl}`);
-    console.log(`Open on your local network ${snapshot.networkOpenUrl}`);
+  console.log(`Pocodex listening on ${serveUrls.localUrl}`);
+  console.log(`Open ${serveUrls.localOpenUrl}`);
+  if (serveUrls.networkUrl && serveUrls.networkOpenUrl) {
+    console.log(`Local network URL ${serveUrls.networkUrl}`);
+    console.log(`Open on your local network ${serveUrls.networkOpenUrl}`);
   } else if (options.listenHost === "0.0.0.0") {
     console.log("Local network URL unavailable; no active LAN IPv4 address was detected.");
   } else if (options.listenHost === "127.0.0.1" || options.listenHost === "localhost") {
     console.log(
-      `Local network URL unavailable while listening on ${snapshot.localUrl} (use --listen 0.0.0.0:${snapshot.listenPort} to expose it on your LAN)`,
+      `Local network URL unavailable while listening on ${serveUrls.localUrl} (use --listen 0.0.0.0:${listeningAddress.port} to expose it on your LAN)`,
     );
   }
-  console.log(`Using Codex ${snapshot.codexVersion ?? "unknown"} from ${snapshot.appPath}`);
-  console.log(`Using direct app-server bridge from ${options.appPath}`);
+  console.log(`Using Codex ${bundle.version} from ${bundle.appPath}`);
+  if (usedCodexBuild?.isUpdated && usedCodexBuild.previousBuild) {
+    console.log(
+      `Updated Codex detected: now using ${formatCodexBuildSignature(usedCodexBuild.currentBuild)}, previously ${formatCodexBuildSignature(usedCodexBuild.previousBuild)}`,
+    );
+  }
+  console.log(`Using direct app-server bridge from ${bundle.appPath}`);
   if (options.devMode) {
     console.log(`Watching ${pocodexCssPath} for stylesheet changes`);
   }
 }
 
-function parseServeCommand(argv: string[]): ServeCommandOptions {
+async function parseServeCommand(argv: string[]): Promise<ServeCommandOptions> {
   validateServeArgs(argv);
 
-  const appPath = readFlag(argv, "--app") ?? DEFAULT_POCODEX_APP_PATH;
+  const appPath = readFlag(argv, "--app") ?? (await resolveDefaultCodexAppPath());
   const listen = readFlag(argv, "--listen") ?? DEFAULT_LISTEN;
   const token = readFlag(argv, "--token") ?? "";
   const devMode = hasFlag(argv, "--dev");
 
-  const [listenHost, portText] = listen.split(":");
-  const listenPort = Number.parseInt(portText ?? "", 10);
-  if (!listenHost || !Number.isInteger(listenPort) || listenPort < 0) {
+  const parsedListenAddress = parseListenAddress(listen);
+  if (!parsedListenAddress) {
     throw new Error(`Invalid --listen value: ${listen}`);
   }
 
   return {
     appPath,
     devMode,
-    listenHost,
-    listenPort,
+    listenHost: parsedListenAddress.listenHost,
+    listenPort: parsedListenAddress.listenPort,
     token,
   };
 }
@@ -144,9 +232,34 @@ function hasFlag(argv: string[], name: string): boolean {
 
 function printUsage(): void {
   console.error("Usage:");
-  console.error(
-    "  pocodex [--token <secret>] [--app /Applications/Codex.app] [--listen 127.0.0.1:8787] [--dev]",
-  );
+  console.error("  pocodex [--token <secret>] [--app <path>] [--listen 127.0.0.1:8787] [--dev]");
+}
+
+function watchPocodexStylesheet(cssFilePath: string, onChange: () => void): () => void {
+  const cssDirectory = dirname(cssFilePath);
+  const cssFilename = basename(cssFilePath);
+  let debounceTimer: NodeJS.Timeout | undefined;
+
+  const watcher = watch(cssDirectory, (_eventType, changedFilename) => {
+    const changedName = changedFilename ? String(changedFilename) : undefined;
+    if (changedName && changedName !== cssFilename) {
+      return;
+    }
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+    }
+    debounceTimer = setTimeout(() => {
+      debounceTimer = undefined;
+      onChange();
+    }, 50);
+  });
+
+  return () => {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+    }
+    watcher.close();
+  };
 }
 
 await main().catch((error) => {

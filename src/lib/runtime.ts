@@ -9,11 +9,19 @@ import { AppServerBridge } from "./app-server-bridge.js";
 import { renderBootstrapScript } from "./bootstrap-script.js";
 import { loadCodexBundle } from "./codex-bundle.js";
 import { patchIndexHtml } from "./html-patcher.js";
+import { renderPwaHeadTags, renderServiceWorkerScript, renderWebManifest } from "./pwa.js";
 import type { HostBridge, SentryInitOptions } from "./protocol.js";
 import { getServeUrls } from "./serve-url.js";
 import { PocodexServer } from "./server.js";
 
 export const DEFAULT_POCODEX_APP_PATH = "/Applications/Codex.app";
+const POCODEX_BACKGROUND_COLOR = "#111827";
+const POCODEX_MANIFEST_HREF = "/manifest.webmanifest";
+const POCODEX_PWA_APP_NAME = "Pocodex";
+const POCODEX_PWA_DESCRIPTION = "Run the Codex desktop webview in an installable browser shell.";
+const POCODEX_SERVICE_WORKER_HREF = "/service-worker.js";
+const POCODEX_STYLESHEET_HREF = "/pocodex.css";
+const POCODEX_THEME_COLOR = "#111827";
 
 export type PocodexState = "starting" | "running" | "stopped" | "error";
 
@@ -161,6 +169,15 @@ class ManagedPocodexRuntime extends EventEmitter implements PocodexRuntime {
         buildNumber: bundle.buildNumber,
         codexAppSessionId: randomUUID(),
       };
+      const pwaConfig = {
+        appName: POCODEX_PWA_APP_NAME,
+        shortName: POCODEX_PWA_APP_NAME,
+        description: POCODEX_PWA_DESCRIPTION,
+        themeColor: POCODEX_THEME_COLOR,
+        backgroundColor: POCODEX_BACKGROUND_COLOR,
+        manifestPath: POCODEX_MANIFEST_HREF,
+        iconHref: bundle.faviconHref,
+      };
 
       server = new PocodexServer({
         listenHost: this.options.listenHost,
@@ -173,13 +190,23 @@ class ManagedPocodexRuntime extends EventEmitter implements PocodexRuntime {
           const indexHtml = await bundle.readIndexHtml();
           return patchIndexHtml(indexHtml, {
             bootstrapScript: renderBootstrapScript({
+              devMode: this.options.devMode,
               sentryOptions,
-              stylesheetHref: "/pocodex.css",
+              stylesheetHref: POCODEX_STYLESHEET_HREF,
               importIconSvg: await readFile(importIconSvgPath, "utf8"),
             }),
-            stylesheetHref: "/pocodex.css",
+            faviconHref: bundle.faviconHref,
+            headTags: renderPwaHeadTags(pwaConfig),
+            stylesheetHref: POCODEX_STYLESHEET_HREF,
           });
         },
+        renderWebManifest: async () => renderWebManifest(pwaConfig),
+        renderServiceWorkerScript: async () =>
+          renderServiceWorkerScript({
+            cacheName: `pocodex-shell:${bundle.version}:${bundle.buildNumber}`,
+            indexPath: "/index.html",
+            serviceWorkerPath: POCODEX_SERVICE_WORKER_HREF,
+          }),
       });
 
       stopWatchingStylesheet = this.options.devMode
